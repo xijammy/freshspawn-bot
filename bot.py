@@ -25,7 +25,7 @@ WELCOME_TEXT = (
     "Thank you for joining the server, please go to "
     f"<#{CREATE_TICKET_CHANNEL_ID}> to book an optimisation. "
     "If a ticket has not been created in the next 24 hours then you will be automatically kicked "
-    "and you will need to rejoin once you are ready to purchase."
+    "and you will need to rejoin once you are ready to purchase. Please DO NOT FORGET to read the ❗PLEASE READ❗ Category especially if booking an Optimisation"
 )
 
 intents = discord.Intents.default()
@@ -217,3 +217,4 @@ async def before_timer_loop():
     await bot.wait_until_ready()
 
 bot.run(DISCORD_TOKEN)
+
