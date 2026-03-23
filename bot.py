@@ -11,7 +11,8 @@ DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
 FRESH_SPAWNS_CHANNEL_ID = 1454402793157824603
 CREATE_TICKET_CHANNEL_ID = 986685464251609118
 
-TICKET_NAME_RE = re.compile(r"^ticket-\d+$", re.IGNORECASE)
+# Broader match so it still catches common Ticket Tool naming styles
+TICKET_NAME_RE = re.compile(r"ticket-\d+", re.IGNORECASE)
 
 ENQUIRED_ROLE_ID = 1473603025770647615
 FRESH_SPAWN_ROLE_NAME = "Fresh Spawn"
@@ -33,6 +34,7 @@ intents.members = True
 intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+
 
 # ---------- DB ----------
 async def init_db():
@@ -56,6 +58,7 @@ async def init_db():
         """)
         await db.commit()
 
+
 async def upsert_join_time(guild_id: int, user_id: int, joined_at: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
@@ -67,13 +70,16 @@ async def upsert_join_time(guild_id: int, user_id: int, joined_at: int):
         """, (guild_id, user_id, joined_at))
         await db.commit()
 
+
 async def mark_processed(guild_id: int, user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
-            UPDATE join_timers SET processed=1
+            UPDATE join_timers
+            SET processed=1
             WHERE guild_id=? AND user_id=?
         """, (guild_id, user_id))
         await db.commit()
+
 
 async def fetch_due(now_ts: int):
     cutoff = now_ts - DUE_SECONDS
@@ -84,6 +90,7 @@ async def fetch_due(now_ts: int):
             WHERE processed=0 AND joined_at <= ?
         """, (cutoff,))
         return await cur.fetchall()
+
 
 async def save_ticket_owner(guild_id: int, channel_id: int, user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -97,6 +104,7 @@ async def save_ticket_owner(guild_id: int, channel_id: int, user_id: int):
         """, (guild_id, channel_id, user_id, int(time.time())))
         await db.commit()
 
+
 async def fetch_ticket_owner(channel_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("""
@@ -106,6 +114,7 @@ async def fetch_ticket_owner(channel_id: int):
         """, (channel_id,))
         return await cur.fetchone()
 
+
 async def delete_ticket_owner(channel_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
@@ -114,10 +123,16 @@ async def delete_ticket_owner(channel_id: int):
         """, (channel_id,))
         await db.commit()
 
+
 # ---------- Helpers ----------
 def has_only_role(member: discord.Member, role: discord.Role) -> bool:
     real_roles = [r for r in member.roles if r != member.guild.default_role]
     return len(real_roles) == 1 and real_roles[0].id == role.id
+
+
+def looks_like_ticket_channel(name: str) -> bool:
+    return bool(TICKET_NAME_RE.search(name))
+
 
 async def post_public_welcome(guild: discord.Guild, member: discord.Member):
     ch = guild.get_channel(FRESH_SPAWNS_CHANNEL_ID)
@@ -131,6 +146,7 @@ async def post_public_welcome(guild: discord.Guild, member: discord.Member):
         print("[WARN] Missing permission to send message in ❓-fresh-spawns.")
     except discord.HTTPException as e:
         print(f"[WARN] Failed to post welcome: {e}")
+
 
 async def give_enquired_role(member: discord.Member):
     role = member.guild.get_role(ENQUIRED_ROLE_ID)
@@ -146,6 +162,7 @@ async def give_enquired_role(member: discord.Member):
         await member.add_roles(role, reason="Ticket opened (Ticket Tool detected).")
         print(f"[INFO] Added enquired role to {member} ({member.id})")
 
+
 async def remove_enquired_role(member: discord.Member):
     role = member.guild.get_role(ENQUIRED_ROLE_ID)
     if role is None:
@@ -159,16 +176,23 @@ async def remove_enquired_role(member: discord.Member):
     if role in member.roles:
         await member.remove_roles(role, reason="Ticket closed.")
         print(f"[INFO] Removed enquired role from {member} ({member.id})")
+    else:
+        print(f"[INFO] {member} ({member.id}) did not have enquired role at deletion time.")
+
 
 async def resolve_ticket_owner_from_channel(channel: discord.TextChannel) -> discord.Member | None:
+    # small delay so Ticket Tool has time to post its opening message
     await asyncio.sleep(2)
+
     try:
-        async for msg in channel.history(limit=15, oldest_first=True):
+        # Prefer bot messages mentioning the ticket opener
+        async for msg in channel.history(limit=20, oldest_first=True):
             if msg.author.bot and msg.mentions:
                 for m in msg.mentions:
                     if isinstance(m, discord.Member) and not m.bot:
                         return m
 
+        # Fallback: first non-bot message author in the ticket
         async for msg in channel.history(limit=50, oldest_first=True):
             if isinstance(msg.author, discord.Member) and not msg.author.bot:
                 return msg.author
@@ -180,6 +204,7 @@ async def resolve_ticket_owner_from_channel(channel: discord.TextChannel) -> dis
 
     return None
 
+
 # ---------- Events ----------
 @bot.event
 async def on_ready():
@@ -188,44 +213,57 @@ async def on_ready():
         timer_loop.start()
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
 
+
 @bot.event
 async def on_member_join(member: discord.Member):
     await upsert_join_time(member.guild.id, member.id, int(time.time()))
     print(f"[INFO] Started 24h timer for {member} ({member.id}) via on_member_join")
     await post_public_welcome(member.guild, member)
 
+
 @bot.event
 async def on_guild_channel_create(channel: discord.abc.GuildChannel):
     if not isinstance(channel, discord.TextChannel):
         return
-    if not TICKET_NAME_RE.match(channel.name):
+
+    if not looks_like_ticket_channel(channel.name):
         return
+
+    print(f"[DEBUG] Ticket channel created: {channel.name} ({channel.id})")
 
     owner = await resolve_ticket_owner_from_channel(channel)
     if owner is None:
         print(f"[WARN] Ticket channel {channel.name} created but owner not found.")
         return
 
+    print(f"[DEBUG] Resolved owner: {owner} ({owner.id})")
+
     await save_ticket_owner(channel.guild.id, channel.id, owner.id)
+    print(f"[DEBUG] Saved ticket owner mapping channel={channel.id} user={owner.id}")
+
     await give_enquired_role(owner)
     await mark_processed(channel.guild.id, owner.id)
     print(f"[INFO] Ended timer for {owner} ({owner.id}) because ticket was opened.")
+
 
 @bot.event
 async def on_guild_channel_delete(channel: discord.abc.GuildChannel):
     if not isinstance(channel, discord.TextChannel):
         return
-    if not TICKET_NAME_RE.match(channel.name):
-        return
 
+    print(f"[DEBUG] Channel deleted: {channel.name} ({channel.id})")
+
+    # Do NOT check the name here.
+    # Ticket Tool may rename the channel before deleting it.
     row = await fetch_ticket_owner(channel.id)
     if row is None:
-        print(f"[INFO] Deleted ticket {channel.name} had no stored owner mapping.")
+        print(f"[INFO] Deleted channel {channel.name} ({channel.id}) had no stored owner mapping.")
         return
 
     guild_id, user_id = row
     guild = bot.get_guild(guild_id) or channel.guild
     if guild is None:
+        print(f"[WARN] Guild {guild_id} not found when deleting ticket channel {channel.id}")
         await delete_ticket_owner(channel.id)
         return
 
@@ -250,6 +288,8 @@ async def on_guild_channel_delete(channel: discord.abc.GuildChannel):
         print(f"[WARN] Failed to remove enquired role from {member}: {e}")
 
     await delete_ticket_owner(channel.id)
+    print(f"[DEBUG] Deleted stored ticket owner mapping for channel {channel.id}")
+
 
 # ---------- Timer loop ----------
 @tasks.loop(minutes=CHECK_EVERY_MINUTES)
@@ -300,8 +340,10 @@ async def timer_loop():
 
         await mark_processed(guild_id, user_id)
 
+
 @timer_loop.before_loop
 async def before_timer_loop():
     await bot.wait_until_ready()
+
 
 bot.run(DISCORD_TOKEN)
