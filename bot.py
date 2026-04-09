@@ -15,6 +15,9 @@ POST_SERVICE_CHANNEL_ID = int(os.environ["POST_SERVICE_CHANNEL_ID"])
 POST_SERVICE_ROLE_ID = int(os.environ["POST_SERVICE_ROLE_ID"])
 GOATS_ROLE_ID = int(os.environ["GOATS_ROLE_ID"])
 
+BOOKED_OPTI_ROLE_ID = 1454148372377374730
+FRESH_SPAWN_ROLE_ID = 1454403124155519108
+
 # Broader match so it still catches common Ticket Tool naming styles
 TICKET_NAME_RE = re.compile(r"ticket-\d+", re.IGNORECASE)
 
@@ -251,18 +254,15 @@ async def remove_enquired_role(member: discord.Member):
 
 
 async def resolve_ticket_owner_from_channel(channel: discord.TextChannel) -> discord.Member | None:
-    # small delay so Ticket Tool has time to post its opening message
     await asyncio.sleep(2)
 
     try:
-        # Prefer bot messages mentioning the ticket opener
         async for msg in channel.history(limit=20, oldest_first=True):
             if msg.author.bot and msg.mentions:
                 for m in msg.mentions:
                     if isinstance(m, discord.Member) and not m.bot:
                         return m
 
-        # Fallback: first non-bot message author in the ticket
         async for msg in channel.history(limit=50, oldest_first=True):
             if isinstance(msg.author, discord.Member) and not msg.author.bot:
                 return msg.author
@@ -332,8 +332,6 @@ async def on_guild_channel_delete(channel: discord.abc.GuildChannel):
 
     print(f"[DEBUG] Channel deleted: {channel.name} ({channel.id})")
 
-    # Do NOT check the name here.
-    # Ticket Tool may rename the channel before deleting it.
     row = await fetch_ticket_owner(channel.id)
     if row is None:
         print(f"[INFO] Deleted channel {channel.name} ({channel.id}) had no stored owner mapping.")
@@ -366,6 +364,89 @@ async def on_guild_channel_delete(channel: discord.abc.GuildChannel):
 
 
 # ---------- Slash Commands ----------
+@bot.tree.command(name="booked", description="Mark a user's optimisation as booked")
+@app_commands.checks.has_permissions(manage_channels=True)
+async def booked(interaction: discord.Interaction):
+    if not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message(
+            "❌ This command must be used inside a ticket channel.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(ephemeral=False)
+
+    row = await fetch_ticket_owner(interaction.channel.id)
+
+    if row is None:
+        owner = await resolve_ticket_owner_from_channel(interaction.channel)
+
+        if owner is None:
+            await interaction.followup.send(
+                "❌ Could not determine the ticket owner for this channel.",
+                ephemeral=True
+            )
+            return
+
+        await save_ticket_owner(interaction.guild.id, interaction.channel.id, owner.id)
+        row = (interaction.guild.id, owner.id)
+
+    _guild_id, user_id = row
+
+    guild = interaction.guild
+    if guild is None:
+        await interaction.followup.send("❌ Guild not found.", ephemeral=True)
+        return
+
+    try:
+        member = guild.get_member(user_id) or await guild.fetch_member(user_id)
+    except discord.NotFound:
+        await interaction.followup.send(
+            "❌ The ticket owner is no longer in the server.",
+            ephemeral=True
+        )
+        return
+
+    booked_role = guild.get_role(BOOKED_OPTI_ROLE_ID)
+    fresh_spawn_role = guild.get_role(FRESH_SPAWN_ROLE_ID)
+
+    try:
+        if booked_role is not None and booked_role not in member.roles:
+            await member.add_roles(booked_role, reason="Optimisation booked")
+
+        if fresh_spawn_role is not None and fresh_spawn_role in member.roles:
+            await member.remove_roles(fresh_spawn_role, reason="Optimisation booked")
+
+    except discord.Forbidden:
+        await interaction.followup.send(
+            "❌ I couldn't update the user's roles due to permissions/role hierarchy.",
+            ephemeral=True
+        )
+        return
+    except discord.HTTPException as e:
+        await interaction.followup.send(
+            f"❌ Failed to update roles: {e}",
+            ephemeral=True
+        )
+        return
+
+    await interaction.channel.send(
+        f"{member.mention}\n"
+        "✅ Your optimisation has now been successfully booked.\n\n"
+        "You have now been given the **Booked Opti** role.\n\n"
+        "Before your optimisation takes place, you must:\n"
+        "• Read and agree to <#477342444822597776>\n"
+        "• Read and follow all required steps in <#1454148951644180573>\n\n"
+        "⚠️ You must agree to the warranty and terms before your optimisation takes place.\n"
+        "⚠️ You must also complete the optimisation steps beforehand to avoid delays or issues during the session."
+    )
+
+    await interaction.followup.send(
+        "✅ User marked as booked and roles updated.",
+        ephemeral=True
+    )
+
+
 @bot.tree.command(name="complete", description="Mark optimisation as complete and start the 7-day review timer")
 @app_commands.checks.has_permissions(manage_channels=True)
 async def complete(interaction: discord.Interaction):
@@ -410,14 +491,18 @@ async def complete(interaction: discord.Interaction):
         return
 
     goats_role = guild.get_role(GOATS_ROLE_ID)
-    fresh_spawn_role = discord.utils.get(guild.roles, name=FRESH_SPAWN_ROLE_NAME)
+    booked_role = guild.get_role(BOOKED_OPTI_ROLE_ID)
+    fresh_spawn_role = guild.get_role(FRESH_SPAWN_ROLE_ID)
 
     try:
         if goats_role is not None and goats_role not in member.roles:
             await member.add_roles(goats_role, reason="Optimisation marked complete")
 
+        if booked_role is not None and booked_role in member.roles:
+            await member.remove_roles(booked_role, reason="Optimisation completed")
+
         if fresh_spawn_role is not None and fresh_spawn_role in member.roles:
-            await member.remove_roles(fresh_spawn_role, reason="User completed optimisation")
+            await member.remove_roles(fresh_spawn_role, reason="Optimisation completed")
 
     except discord.Forbidden:
         await interaction.followup.send(
@@ -447,6 +532,60 @@ async def complete(interaction: discord.Interaction):
     )
 
     await interaction.followup.send("✅ Completion recorded and 7-day timer started.", ephemeral=True)
+
+
+@booked.error
+async def booked_error(interaction: discord.Interaction, error):
+    if isinstance(error, app_commands.errors.MissingPermissions):
+        if interaction.response.is_done():
+            await interaction.followup.send(
+                "❌ You do not have permission to use this command.",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                "❌ You do not have permission to use this command.",
+                ephemeral=True
+            )
+    else:
+        if interaction.response.is_done():
+            await interaction.followup.send(
+                f"❌ An error occurred: {error}",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                f"❌ An error occurred: {error}",
+                ephemeral=True
+            )
+
+
+@complete.error
+async def complete_error(interaction: discord.Interaction, error):
+    if isinstance(error, app_commands.errors.MissingPermissions):
+        if interaction.response.is_done():
+            await interaction.followup.send(
+                "❌ You do not have permission to use this command.",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                "❌ You do not have permission to use this command.",
+                ephemeral=True
+            )
+    else:
+        if interaction.response.is_done():
+            await interaction.followup.send(
+                f"❌ An error occurred: {error}",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                f"❌ An error occurred: {error}",
+                ephemeral=True
+            )
+
+
 # ---------- Timer loops ----------
 @tasks.loop(minutes=CHECK_EVERY_MINUTES)
 async def timer_loop():
@@ -531,12 +670,10 @@ async def post_service_loop():
 
         elapsed = now_ts - completed_at
 
-        # If they've already confirmed, mark finalised and move on
         if has_post_service_role and not finalised:
             await mark_completed_ticket_finalised(channel_id)
             continue
 
-        # Send 7-day reminder
         if not reminded and elapsed >= POST_SERVICE_REVIEW_SECONDS:
             try:
                 await channel.send(
@@ -554,7 +691,6 @@ async def post_service_loop():
                 print(f"[WARN] Failed to send reminder in channel {channel_id}: {e}")
             continue
 
-        # Finalise 12 hours after reminder if still no confirmation
         if reminded and not finalised and elapsed >= (POST_SERVICE_REVIEW_SECONDS + POST_SERVICE_FINAL_WARNING_SECONDS):
             if post_service_role is not None and post_service_role not in member.roles:
                 try:
