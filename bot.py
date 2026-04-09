@@ -409,12 +409,12 @@ async def complete(interaction: discord.Interaction):
         )
         return
 
-goats_role = guild.get_role(GOATS_ROLE_ID)
-fresh_spawn_role = discord.utils.get(guild.roles, name=FRESH_SPAWN_ROLE_NAME)
+    goats_role = guild.get_role(GOATS_ROLE_ID)
+    fresh_spawn_role = discord.utils.get(guild.roles, name=FRESH_SPAWN_ROLE_NAME)
 
-if goats_role is not None and goats_role not in member.roles:
     try:
-        await member.add_roles(goats_role, reason="Optimisation marked complete")
+        if goats_role is not None and goats_role not in member.roles:
+            await member.add_roles(goats_role, reason="Optimisation marked complete")
 
         if fresh_spawn_role is not None and fresh_spawn_role in member.roles:
             await member.remove_roles(fresh_spawn_role, reason="User completed optimisation")
