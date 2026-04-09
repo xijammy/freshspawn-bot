@@ -367,10 +367,6 @@ async def on_guild_channel_delete(channel: discord.abc.GuildChannel):
 
 # ---------- Slash Commands ----------
     row = (interaction.guild.id, owner.id)
-Full improved /complete command
-
-Paste this whole thing over your current one:
-
 @bot.tree.command(name="complete", description="Mark optimisation as complete and start the 7-day review timer")
 @app_commands.checks.has_permissions(manage_channels=True)
 async def complete(interaction: discord.Interaction):
@@ -383,17 +379,20 @@ async def complete(interaction: discord.Interaction):
 
     await interaction.response.defer(ephemeral=False)
 
-    row = await fetch_ticket_owner(interaction.channel.id)
+row = await fetch_ticket_owner(interaction.channel.id)
 
-    if row is None:
-        owner = await resolve_ticket_owner_from_channel(interaction.channel)
+if row is None:
+    owner = await resolve_ticket_owner_from_channel(interaction.channel)
 
-        if owner is None:
-            await interaction.followup.send(
-                "❌ Could not determine the ticket owner for this channel.",
-                ephemeral=True
-            )
-            return
+    if owner is None:
+        await interaction.followup.send(
+            "❌ Could not determine the ticket owner for this channel.",
+            ephemeral=True
+        )
+        return
+
+    await save_ticket_owner(interaction.guild.id, interaction.channel.id, owner.id)
+    row = (interaction.guild.id, owner.id)
 
         await save_ticket_owner(interaction.guild.id, interaction.channel.id, owner.id)
         row = (interaction.guild.id, owner.id)
