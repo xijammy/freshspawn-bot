@@ -366,6 +366,11 @@ async def on_guild_channel_delete(channel: discord.abc.GuildChannel):
 
 
 # ---------- Slash Commands ----------
+    row = (interaction.guild.id, owner.id)
+Full improved /complete command
+
+Paste this whole thing over your current one:
+
 @bot.tree.command(name="complete", description="Mark optimisation as complete and start the 7-day review timer")
 @app_commands.checks.has_permissions(manage_channels=True)
 async def complete(interaction: discord.Interaction):
@@ -379,12 +384,19 @@ async def complete(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=False)
 
     row = await fetch_ticket_owner(interaction.channel.id)
+
     if row is None:
-        await interaction.followup.send(
-            "❌ Could not determine the ticket owner for this channel.",
-            ephemeral=True
-        )
-        return
+        owner = await resolve_ticket_owner_from_channel(interaction.channel)
+
+        if owner is None:
+            await interaction.followup.send(
+                "❌ Could not determine the ticket owner for this channel.",
+                ephemeral=True
+            )
+            return
+
+        await save_ticket_owner(interaction.guild.id, interaction.channel.id, owner.id)
+        row = (interaction.guild.id, owner.id)
 
     _guild_id, user_id = row
 
@@ -434,33 +446,6 @@ async def complete(interaction: discord.Interaction):
     )
 
     await interaction.followup.send("✅ Completion recorded and 7-day timer started.", ephemeral=True)
-
-
-@complete.error
-async def complete_error(interaction: discord.Interaction, error):
-    if isinstance(error, app_commands.errors.MissingPermissions):
-        if interaction.response.is_done():
-            await interaction.followup.send(
-                "❌ You do not have permission to use this command.",
-                ephemeral=True
-            )
-        else:
-            await interaction.response.send_message(
-                "❌ You do not have permission to use this command.",
-                ephemeral=True
-            )
-    else:
-        if interaction.response.is_done():
-            await interaction.followup.send(
-                f"❌ An error occurred: {error}",
-                ephemeral=True
-            )
-        else:
-            await interaction.response.send_message(
-                f"❌ An error occurred: {error}",
-                ephemeral=True
-            )
-
 
 # ---------- Timer loops ----------
 @tasks.loop(minutes=CHECK_EVERY_MINUTES)
