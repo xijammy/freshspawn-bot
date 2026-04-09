@@ -435,7 +435,7 @@ async def booked(interaction: discord.Interaction):
         "✅ Your optimisation has now been successfully booked.\n\n"
         "You have now been given the **Booked Opti** role.\n\n"
         "Before your optimisation takes place, you must:\n"
-        "• Read and agree to <#477342444822597776>\n"
+        "• Read and agree to <#1477342444822597776>\n"
         "• Read and follow all required steps in <#1454148951644180573>\n\n"
         "⚠️ You must agree to the warranty and terms before your optimisation takes place.\n"
         "⚠️ You must also complete the optimisation steps beforehand to avoid delays or issues during the session."
