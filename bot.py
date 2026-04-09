@@ -409,22 +409,28 @@ async def complete(interaction: discord.Interaction):
         )
         return
 
-    goats_role = guild.get_role(GOATS_ROLE_ID)
-    if goats_role is not None and goats_role not in member.roles:
-        try:
-            await member.add_roles(goats_role, reason="Optimisation marked complete")
-        except discord.Forbidden:
-            await interaction.followup.send(
-                "❌ I couldn't assign the GOATS role due to permissions/role hierarchy.",
-                ephemeral=True
-            )
-            return
-        except discord.HTTPException as e:
-            await interaction.followup.send(
-                f"❌ Failed to assign GOATS role: {e}",
-                ephemeral=True
-            )
-            return
+goats_role = guild.get_role(GOATS_ROLE_ID)
+fresh_spawn_role = discord.utils.get(guild.roles, name=FRESH_SPAWN_ROLE_NAME)
+
+if goats_role is not None and goats_role not in member.roles:
+    try:
+        await member.add_roles(goats_role, reason="Optimisation marked complete")
+
+        if fresh_spawn_role is not None and fresh_spawn_role in member.roles:
+            await member.remove_roles(fresh_spawn_role, reason="User completed optimisation")
+
+    except discord.Forbidden:
+        await interaction.followup.send(
+            "❌ I couldn't update the user's roles due to permissions/role hierarchy.",
+            ephemeral=True
+        )
+        return
+    except discord.HTTPException as e:
+        await interaction.followup.send(
+            f"❌ Failed to update roles: {e}",
+            ephemeral=True
+        )
+        return
 
     await save_completed_ticket(guild.id, interaction.channel.id, member.id)
 
