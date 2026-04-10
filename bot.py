@@ -1058,7 +1058,7 @@ async def complete(interaction: discord.Interaction):
         )
         return
 
-await save_completed_ticket(guild.id, interaction.channel.id, member.id)
+    await save_completed_ticket(guild.id, interaction.channel.id, member.id)
 
 # 🔽 MOVE TO COMPLETED CATEGORY
 completed_category = guild.get_channel(COMPLETED_CATEGORY_ID)
