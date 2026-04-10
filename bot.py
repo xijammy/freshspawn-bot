@@ -193,7 +193,7 @@ async def delete_ticket_owner(channel_id: int):
         await db.commit()
 
 
-async def save_d_ticket(guild_id: int, channel_id: int, user_id: int):
+async def save_completed_ticket(guild_id: int, channel_id: int, user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             INSERT INTO completed_tickets (channel_id, guild_id, user_id, completed_at, reminded, finalised)
