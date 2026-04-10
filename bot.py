@@ -668,8 +668,14 @@ class PhotoConfirmView(discord.ui.View):
         try:
             await interaction.response.edit_message(
                 content=(
-                    "✅ **Screenshots confirmed and logged.**\n\n"
-                    "Thank you. Your screenshots, timestamps, original message links, and confirmation have now been securely logged."
+                    f"<@{session['user_id']}>\n"
+                    "✅ I’ve detected **2 screenshots**.\n\n"
+                    "**Please confirm the following by clicking the green button below:**\n"
+                    "• these screenshots were provided by you\n"
+                    "• they are from your system\n"
+                    "• you are satisfied with the performance difference shown\n\n"
+                    "Once confirmed, the screenshots, timestamps, and original message links will be logged privately.\n\n"
+                    f"✅ **Confirmed and logged on** {ts_to_discord_relative(confirmed_at)}."
                 ),
                 view=self
             )
