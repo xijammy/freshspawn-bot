@@ -546,7 +546,7 @@ class PhotoConfirmView(discord.ui.View):
         self.channel_id = channel_id
         self.user_id = user_id
 
-      @discord.ui.button(label="✅ Confirm Screenshots", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="✅ Confirm Screenshots", style=discord.ButtonStyle.success)
     async def confirm_screenshots(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message(
