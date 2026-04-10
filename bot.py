@@ -1,7 +1,9 @@
 import os
 import re
 import time
+import io
 import asyncio
+import aiohttp
 import aiosqlite
 import discord
 from discord.ext import commands, tasks
@@ -81,43 +83,45 @@ async def init_db():
         """)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS photo_sessions (
-                channel_id            INTEGER NOT NULL PRIMARY KEY,
-                guild_id              INTEGER NOT NULL,
-                user_id               INTEGER NOT NULL,
-                started_at            INTEGER NOT NULL,
-                prompt_message_id     INTEGER,
-                confirm_message_id    INTEGER,
+                channel_id             INTEGER NOT NULL PRIMARY KEY,
+                guild_id               INTEGER NOT NULL,
+                user_id                INTEGER NOT NULL,
+                started_at             INTEGER NOT NULL,
+                prompt_message_id      INTEGER,
+                confirm_message_id     INTEGER,
                 screenshot1_message_id INTEGER,
-                screenshot1_url       TEXT,
-                screenshot1_filename  TEXT,
-                screenshot1_ts        INTEGER,
+                screenshot1_url        TEXT,
+                screenshot1_filename   TEXT,
+                screenshot1_ts         INTEGER,
                 screenshot2_message_id INTEGER,
-                screenshot2_url       TEXT,
-                screenshot2_filename  TEXT,
-                screenshot2_ts        INTEGER,
-                status                TEXT NOT NULL,
-                confirmed_at          INTEGER,
-                logged_message_id     INTEGER
+                screenshot2_url        TEXT,
+                screenshot2_filename   TEXT,
+                screenshot2_ts         INTEGER,
+                status                 TEXT NOT NULL,
+                confirmed_at           INTEGER,
+                logged_message_id      INTEGER
             )
         """)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS performance_proof_logs (
-                id                    INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id              INTEGER NOT NULL,
-                channel_id            INTEGER NOT NULL,
-                user_id               INTEGER NOT NULL,
-                confirm_message_id    INTEGER NOT NULL,
+                id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id               INTEGER NOT NULL,
+                channel_id             INTEGER NOT NULL,
+                user_id                INTEGER NOT NULL,
+                confirmed_by_user_id   INTEGER NOT NULL,
+                confirmed_by_name      TEXT NOT NULL,
+                confirm_message_id     INTEGER NOT NULL,
                 screenshot1_message_id INTEGER NOT NULL,
                 screenshot2_message_id INTEGER NOT NULL,
-                screenshot1_url       TEXT NOT NULL,
-                screenshot2_url       TEXT NOT NULL,
-                screenshot1_filename  TEXT,
-                screenshot2_filename  TEXT,
-                screenshot1_ts        INTEGER NOT NULL,
-                screenshot2_ts        INTEGER NOT NULL,
-                confirmed_at          INTEGER NOT NULL,
-                logged_at             INTEGER NOT NULL,
-                log_message_id        INTEGER
+                screenshot1_url        TEXT NOT NULL,
+                screenshot2_url        TEXT NOT NULL,
+                screenshot1_filename   TEXT,
+                screenshot2_filename   TEXT,
+                screenshot1_ts         INTEGER NOT NULL,
+                screenshot2_ts         INTEGER NOT NULL,
+                confirmed_at           INTEGER NOT NULL,
+                logged_at              INTEGER NOT NULL,
+                log_message_id         INTEGER
             )
         """)
         await db.commit()
@@ -357,6 +361,8 @@ async def save_performance_proof_log(
     guild_id: int,
     channel_id: int,
     user_id: int,
+    confirmed_by_user_id: int,
+    confirmed_by_name: str,
     confirm_message_id: int,
     screenshot1_message_id: int,
     screenshot2_message_id: int,
@@ -372,16 +378,20 @@ async def save_performance_proof_log(
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             INSERT INTO performance_proof_logs (
-                guild_id, channel_id, user_id, confirm_message_id,
+                guild_id, channel_id, user_id,
+                confirmed_by_user_id, confirmed_by_name,
+                confirm_message_id,
                 screenshot1_message_id, screenshot2_message_id,
                 screenshot1_url, screenshot2_url,
                 screenshot1_filename, screenshot2_filename,
                 screenshot1_ts, screenshot2_ts,
                 confirmed_at, logged_at, log_message_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            guild_id, channel_id, user_id, confirm_message_id,
+            guild_id, channel_id, user_id,
+            confirmed_by_user_id, confirmed_by_name,
+            confirm_message_id,
             screenshot1_message_id, screenshot2_message_id,
             screenshot1_url, screenshot2_url,
             screenshot1_filename, screenshot2_filename,
@@ -412,8 +422,27 @@ def ts_to_discord_relative(ts: int) -> str:
     return f"<t:{ts}:F>"
 
 
+def ts_to_plain_utc(ts: int) -> str:
+    return time.strftime("%d %B %Y %H:%M:%S UTC", time.gmtime(ts))
+
+
 def jump_url(guild_id: int, channel_id: int, message_id: int) -> str:
     return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
+
+
+async def download_discord_file(url: str, filename: str) -> discord.File | None:
+    try:
+        timeout = aiohttp.ClientTimeout(total=20)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    print(f"[WARN] Failed to download {filename}: HTTP {resp.status}")
+                    return None
+                data = await resp.read()
+                return discord.File(io.BytesIO(data), filename=filename)
+    except Exception as e:
+        print(f"[WARN] Failed to download file {filename} from {url}: {e}")
+        return None
 
 
 async def post_public_welcome(guild: discord.Guild, member: discord.Member):
@@ -556,6 +585,9 @@ class PhotoConfirmView(discord.ui.View):
             return
 
         confirmed_at = int(time.time())
+        confirmed_str = ts_to_plain_utc(confirmed_at)
+        confirmer_text = f"{interaction.user} ({interaction.user.id})"
+
         await mark_photo_session_confirmed(interaction.channel.id, confirmed_at)
 
         log_channel = interaction.guild.get_channel(PERFORMANCE_PROOF_LOG_CHANNEL_ID)
@@ -575,6 +607,11 @@ class PhotoConfirmView(discord.ui.View):
         embed.add_field(
             name="Customer",
             value=f"{interaction.user.mention}\n`{interaction.user.id}`",
+            inline=True
+        )
+        embed.add_field(
+            name="Confirmed By",
+            value=f"{interaction.user.mention}\n`{interaction.user}`\n`{interaction.user.id}`",
             inline=True
         )
         embed.add_field(
@@ -609,13 +646,23 @@ class PhotoConfirmView(discord.ui.View):
             name="Confirmation",
             value=(
                 f"[Confirmation Message]({jump_url(interaction.guild.id, interaction.channel.id, session['confirm_message_id'])})\n"
-                f"Confirmed: {ts_to_discord_relative(confirmed_at)}"
+                f"Confirmed: {confirmed_str}\n"
+                f"Confirmed By: `{confirmer_text}`"
             ),
             inline=False
         )
         embed.set_footer(text="MaxFramesGained Performance Proof System")
 
-        # Safer approach: send URLs even if file re-upload fails
+        file1 = await download_discord_file(
+            session["screenshot1_url"],
+            session["screenshot1_filename"] or "screenshot1.png"
+        )
+        file2 = await download_discord_file(
+            session["screenshot2_url"],
+            session["screenshot2_filename"] or "screenshot2.png"
+        )
+        upload_files = [f for f in (file1, file2) if f is not None]
+
         try:
             log_message = await log_channel.send(embed=embed)
         except discord.Forbidden:
@@ -631,23 +678,21 @@ class PhotoConfirmView(discord.ui.View):
             )
             return
 
-        # Re-post the screenshots clearly underneath the embed
-        try:
-            await log_channel.send(
-                content=(
-                    f"**Screenshot 1:** {session['screenshot1_filename'] or 'image'}\n"
-                    f"{session['screenshot1_url']}\n\n"
-                    f"**Screenshot 2:** {session['screenshot2_filename'] or 'image'}\n"
-                    f"{session['screenshot2_url']}"
+        if upload_files:
+            try:
+                await log_channel.send(
+                    content="**Stored Screenshot Copies**",
+                    files=upload_files
                 )
-            )
-        except discord.HTTPException:
-            pass
+            except discord.HTTPException as e:
+                print(f"[WARN] Failed to upload stored screenshot copies: {e}")
 
         await save_performance_proof_log(
             guild_id=interaction.guild.id,
             channel_id=interaction.channel.id,
             user_id=interaction.user.id,
+            confirmed_by_user_id=interaction.user.id,
+            confirmed_by_name=str(interaction.user),
             confirm_message_id=session["confirm_message_id"],
             screenshot1_message_id=session["screenshot1_message_id"],
             screenshot2_message_id=session["screenshot2_message_id"],
@@ -675,7 +720,8 @@ class PhotoConfirmView(discord.ui.View):
                     "• they are from your system\n"
                     "• you are satisfied with the performance difference shown\n\n"
                     "Once confirmed, the screenshots, timestamps, and original message links will be logged privately.\n\n"
-                    f"✅ **Confirmed and logged on** {ts_to_discord_relative(confirmed_at)}."
+                    f"✅ **Confirmed and logged on** {confirmed_str}\n"
+                    f"**Confirmed by:** `{confirmer_text}`"
                 ),
                 view=self
             )
