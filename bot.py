@@ -721,8 +721,10 @@ class PhotoConfirmView(discord.ui.View):
                     "**Please confirm the following by clicking the green button below:**\n"
                     "• these screenshots were provided by you\n"
                     "• they are from your system\n"
+                    "• they accurately reflect the performance shown at the time they were taken\n"
+                    "• you confirm the service has been delivered as described\n"
                     "• you are satisfied with the performance difference shown\n\n"
-                    "Once confirmed, the screenshots, timestamps, and original message links will be logged privately.\n\n"
+                    "Once confirmed, the screenshots, timestamps, original message links, and your confirmation details will be logged privately.\n\n"
                     f"✅ **Confirmed and logged on** {confirmed_str}\n"
                     f"**Confirmed by:** `{confirmer_text}`"
                 ),
