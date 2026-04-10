@@ -546,7 +546,7 @@ class PhotoConfirmView(discord.ui.View):
         self.channel_id = channel_id
         self.user_id = user_id
 
-    @discord.ui.button(label="✅ Confirm Screenshots", style=discord.ButtonStyle.success)
+      @discord.ui.button(label="✅ Confirm Screenshots", style=discord.ButtonStyle.success)
     async def confirm_screenshots(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message(
@@ -584,6 +584,9 @@ class PhotoConfirmView(discord.ui.View):
             )
             return
 
+        # Acknowledge immediately so Discord doesn't time out the interaction
+        await interaction.response.defer()
+
         confirmed_at = int(time.time())
         confirmed_str = ts_to_plain_utc(confirmed_at)
         confirmer_text = f"{interaction.user} ({interaction.user.id})"
@@ -592,7 +595,7 @@ class PhotoConfirmView(discord.ui.View):
 
         log_channel = interaction.guild.get_channel(PERFORMANCE_PROOF_LOG_CHANNEL_ID)
         if not isinstance(log_channel, discord.TextChannel):
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "❌ Proof log channel not found. Ask staff to check PERFORMANCE_PROOF_LOG_CHANNEL_ID.",
                 ephemeral=True
             )
@@ -666,13 +669,13 @@ class PhotoConfirmView(discord.ui.View):
         try:
             log_message = await log_channel.send(embed=embed)
         except discord.Forbidden:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "❌ I do not have permission to post in the proof log channel.",
                 ephemeral=True
             )
             return
         except discord.HTTPException as e:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"❌ Failed to log proof: {e}",
                 ephemeral=True
             )
@@ -711,7 +714,7 @@ class PhotoConfirmView(discord.ui.View):
             child.disabled = True
 
         try:
-            await interaction.response.edit_message(
+            await interaction.message.edit(
                 content=(
                     f"<@{session['user_id']}>\n"
                     "✅ I’ve detected **2 screenshots**.\n\n"
@@ -725,11 +728,13 @@ class PhotoConfirmView(discord.ui.View):
                 ),
                 view=self
             )
-        except discord.HTTPException:
-            await interaction.response.send_message(
-                "✅ Screenshots confirmed and logged.",
-                ephemeral=True
-            )
+        except discord.HTTPException as e:
+            print(f"[WARN] Failed to edit confirmation message: {e}")
+
+        await interaction.followup.send(
+            "✅ Screenshots confirmed and logged.",
+            ephemeral=True
+        )
 
     async def on_timeout(self):
         for child in self.children:
