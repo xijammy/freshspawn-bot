@@ -17,6 +17,7 @@ POST_SERVICE_CHANNEL_ID = int(os.environ["POST_SERVICE_CHANNEL_ID"])
 POST_SERVICE_ROLE_ID = int(os.environ["POST_SERVICE_ROLE_ID"])
 GOATS_ROLE_ID = int(os.environ["GOATS_ROLE_ID"])
 PERFORMANCE_PROOF_LOG_CHANNEL_ID = int(os.environ["PERFORMANCE_PROOF_LOG_CHANNEL_ID"])
+COMPLETED_CATEGORY_ID = int(os.environ["COMPLETED_CATEGORY_ID"])
 
 BOOKED_OPTI_ROLE_ID = 1454148372377374730
 FRESH_SPAWN_ROLE_ID = 1454403124155519108
@@ -1060,29 +1061,35 @@ async def complete(interaction: discord.Interaction):
 
     await save_completed_ticket(guild.id, interaction.channel.id, member.id)
 
-# 🔽 MOVE TO COMPLETED CATEGORY
-completed_category = guild.get_channel(COMPLETED_CATEGORY_ID)
+    # Move to completed category
+    completed_category = guild.get_channel(COMPLETED_CATEGORY_ID)
 
-if isinstance(completed_category, discord.CategoryChannel):
-    try:
-        await interaction.channel.edit(
-            category=completed_category,
-            sync_permissions=False,  # IMPORTANT
-            reason="Moved to completed tickets"
-        )
+    if isinstance(completed_category, discord.CategoryChannel):
+        try:
+            await interaction.channel.edit(
+                category=completed_category,
+                sync_permissions=False,
+                reason="Moved to completed tickets"
+            )
 
-        # Ensure ONLY the ticket owner + staff can see it
-        await interaction.channel.set_permissions(
-            member,
-            view_channel=True,
-            send_messages=True,
-            read_message_history=True
-        )
+            # Ensure only the ticket owner + staff can still access it
+            await interaction.channel.set_permissions(
+                member,
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True
+            )
 
-    except discord.Forbidden:
-        print(f"[WARN] Missing permission to move channel {interaction.channel.id}")
-    except discord.HTTPException as e:
-        print(f"[WARN] Failed to move channel: {e}")
+            # Extra safety: hide from @everyone
+            await interaction.channel.set_permissions(
+                guild.default_role,
+                view_channel=False
+            )
+
+        except discord.Forbidden:
+            print(f"[WARN] Missing permission to move channel {interaction.channel.id}")
+        except discord.HTTPException as e:
+            print(f"[WARN] Failed to move channel: {e}")
 
     await interaction.channel.send(
         f"{member.mention}\n"
@@ -1096,9 +1103,10 @@ if isinstance(completed_category, discord.CategoryChannel):
         "⚠️ Do not private message staff regarding support. Use this ticket only."
     )
 
-    await interaction.followup.send("✅ Completion recorded and 7-day timer started.", ephemeral=True)
-
-
+    await interaction.followup.send(
+        "✅ Completion recorded, ticket moved, and 7-day timer started.",
+        ephemeral=True
+    )
 @bot.tree.command(name="photos", description="Start the performance screenshot confirmation flow for this ticket")
 async def photos(interaction: discord.Interaction):
     if not isinstance(interaction.channel, discord.TextChannel):
