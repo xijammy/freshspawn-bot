@@ -14,11 +14,11 @@ CREATE_TICKET_CHANNEL_ID = 986685464251609118
 POST_SERVICE_CHANNEL_ID = int(os.environ["POST_SERVICE_CHANNEL_ID"])
 POST_SERVICE_ROLE_ID = int(os.environ["POST_SERVICE_ROLE_ID"])
 GOATS_ROLE_ID = int(os.environ["GOATS_ROLE_ID"])
+PERFORMANCE_PROOF_LOG_CHANNEL_ID = int(os.environ["PERFORMANCE_PROOF_LOG_CHANNEL_ID"])
 
 BOOKED_OPTI_ROLE_ID = 1454148372377374730
 FRESH_SPAWN_ROLE_ID = 1454403124155519108
 
-# Broader match so it still catches common Ticket Tool naming styles
 TICKET_NAME_RE = re.compile(r"ticket-\d+", re.IGNORECASE)
 
 ENQUIRED_ROLE_ID = 1473603025770647615
@@ -30,6 +30,7 @@ DB_PATH = "data.db"
 
 POST_SERVICE_REVIEW_SECONDS = 7 * 24 * 3600
 POST_SERVICE_FINAL_WARNING_SECONDS = 12 * 3600
+PHOTO_SESSION_TIMEOUT_SECONDS = 15 * 60
 
 WELCOME_TEXT = (
     "Thank you for joining the server, please go to "
@@ -37,6 +38,8 @@ WELCOME_TEXT = (
     "If a ticket has not been created in the next 24 hours then you will be automatically kicked "
     "and you will need to rejoin once you are ready to purchase. Please DO NOT FORGET to read the ❗PLEASE READ❗ Category especially if booking an Optimisation"
 )
+
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif")
 
 intents = discord.Intents.default()
 intents.guilds = True
@@ -74,6 +77,47 @@ async def init_db():
                 completed_at INTEGER NOT NULL,
                 reminded     INTEGER NOT NULL DEFAULT 0,
                 finalised    INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS photo_sessions (
+                channel_id            INTEGER NOT NULL PRIMARY KEY,
+                guild_id              INTEGER NOT NULL,
+                user_id               INTEGER NOT NULL,
+                started_at            INTEGER NOT NULL,
+                prompt_message_id     INTEGER,
+                confirm_message_id    INTEGER,
+                screenshot1_message_id INTEGER,
+                screenshot1_url       TEXT,
+                screenshot1_filename  TEXT,
+                screenshot1_ts        INTEGER,
+                screenshot2_message_id INTEGER,
+                screenshot2_url       TEXT,
+                screenshot2_filename  TEXT,
+                screenshot2_ts        INTEGER,
+                status                TEXT NOT NULL,
+                confirmed_at          INTEGER,
+                logged_message_id     INTEGER
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS performance_proof_logs (
+                id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id              INTEGER NOT NULL,
+                channel_id            INTEGER NOT NULL,
+                user_id               INTEGER NOT NULL,
+                confirm_message_id    INTEGER NOT NULL,
+                screenshot1_message_id INTEGER NOT NULL,
+                screenshot2_message_id INTEGER NOT NULL,
+                screenshot1_url       TEXT NOT NULL,
+                screenshot2_url       TEXT NOT NULL,
+                screenshot1_filename  TEXT,
+                screenshot2_filename  TEXT,
+                screenshot1_ts        INTEGER NOT NULL,
+                screenshot2_ts        INTEGER NOT NULL,
+                confirmed_at          INTEGER NOT NULL,
+                logged_at             INTEGER NOT NULL,
+                log_message_id        INTEGER
             )
         """)
         await db.commit()
@@ -197,6 +241,156 @@ async def delete_completed_ticket(channel_id: int):
         await db.commit()
 
 
+# ---------- Photo session DB ----------
+async def upsert_photo_session(guild_id: int, channel_id: int, user_id: int, prompt_message_id: int | None):
+    now_ts = int(time.time())
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            INSERT INTO photo_sessions (
+                channel_id, guild_id, user_id, started_at, prompt_message_id,
+                confirm_message_id, screenshot1_message_id, screenshot1_url, screenshot1_filename, screenshot1_ts,
+                screenshot2_message_id, screenshot2_url, screenshot2_filename, screenshot2_ts,
+                status, confirmed_at, logged_message_id
+            )
+            VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'awaiting_uploads', NULL, NULL)
+            ON CONFLICT(channel_id) DO UPDATE SET
+                guild_id=excluded.guild_id,
+                user_id=excluded.user_id,
+                started_at=excluded.started_at,
+                prompt_message_id=excluded.prompt_message_id,
+                confirm_message_id=NULL,
+                screenshot1_message_id=NULL,
+                screenshot1_url=NULL,
+                screenshot1_filename=NULL,
+                screenshot1_ts=NULL,
+                screenshot2_message_id=NULL,
+                screenshot2_url=NULL,
+                screenshot2_filename=NULL,
+                screenshot2_ts=NULL,
+                status='awaiting_uploads',
+                confirmed_at=NULL,
+                logged_message_id=NULL
+        """, (channel_id, guild_id, user_id, now_ts, prompt_message_id))
+        await db.commit()
+
+
+async def fetch_photo_session(channel_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("""
+            SELECT *
+            FROM photo_sessions
+            WHERE channel_id=?
+        """, (channel_id,))
+        return await cur.fetchone()
+
+
+async def update_photo_session_first(channel_id: int, message_id: int, url: str, filename: str, ts: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            UPDATE photo_sessions
+            SET screenshot1_message_id=?,
+                screenshot1_url=?,
+                screenshot1_filename=?,
+                screenshot1_ts=?
+            WHERE channel_id=?
+        """, (message_id, url, filename, ts, channel_id))
+        await db.commit()
+
+
+async def update_photo_session_second(channel_id: int, message_id: int, url: str, filename: str, ts: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            UPDATE photo_sessions
+            SET screenshot2_message_id=?,
+                screenshot2_url=?,
+                screenshot2_filename=?,
+                screenshot2_ts=?
+            WHERE channel_id=?
+        """, (message_id, url, filename, ts, channel_id))
+        await db.commit()
+
+
+async def set_photo_session_confirm_prompt(channel_id: int, confirm_message_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            UPDATE photo_sessions
+            SET confirm_message_id=?,
+                status='awaiting_confirmation'
+            WHERE channel_id=?
+        """, (confirm_message_id, channel_id))
+        await db.commit()
+
+
+async def mark_photo_session_confirmed(channel_id: int, confirmed_at: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            UPDATE photo_sessions
+            SET status='confirmed',
+                confirmed_at=?
+            WHERE channel_id=?
+        """, (confirmed_at, channel_id))
+        await db.commit()
+
+
+async def mark_photo_session_logged(channel_id: int, log_message_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            UPDATE photo_sessions
+            SET status='logged',
+                logged_message_id=?
+            WHERE channel_id=?
+        """, (log_message_id, channel_id))
+        await db.commit()
+
+
+async def delete_photo_session(channel_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            DELETE FROM photo_sessions
+            WHERE channel_id=?
+        """, (channel_id,))
+        await db.commit()
+
+
+async def save_performance_proof_log(
+    guild_id: int,
+    channel_id: int,
+    user_id: int,
+    confirm_message_id: int,
+    screenshot1_message_id: int,
+    screenshot2_message_id: int,
+    screenshot1_url: str,
+    screenshot2_url: str,
+    screenshot1_filename: str,
+    screenshot2_filename: str,
+    screenshot1_ts: int,
+    screenshot2_ts: int,
+    confirmed_at: int,
+    log_message_id: int | None,
+):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            INSERT INTO performance_proof_logs (
+                guild_id, channel_id, user_id, confirm_message_id,
+                screenshot1_message_id, screenshot2_message_id,
+                screenshot1_url, screenshot2_url,
+                screenshot1_filename, screenshot2_filename,
+                screenshot1_ts, screenshot2_ts,
+                confirmed_at, logged_at, log_message_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            guild_id, channel_id, user_id, confirm_message_id,
+            screenshot1_message_id, screenshot2_message_id,
+            screenshot1_url, screenshot2_url,
+            screenshot1_filename, screenshot2_filename,
+            screenshot1_ts, screenshot2_ts,
+            confirmed_at, int(time.time()), log_message_id
+        ))
+        await db.commit()
+
+
 # ---------- Helpers ----------
 def has_only_role(member: discord.Member, role: discord.Role) -> bool:
     real_roles = [r for r in member.roles if r != member.guild.default_role]
@@ -205,6 +399,21 @@ def has_only_role(member: discord.Member, role: discord.Role) -> bool:
 
 def looks_like_ticket_channel(name: str) -> bool:
     return bool(TICKET_NAME_RE.search(name))
+
+
+def is_image_attachment(att: discord.Attachment) -> bool:
+    if att.content_type and att.content_type.startswith("image/"):
+        return True
+    lowered = att.filename.lower()
+    return lowered.endswith(IMAGE_EXTENSIONS)
+
+
+def ts_to_discord_relative(ts: int) -> str:
+    return f"<t:{ts}:F>"
+
+
+def jump_url(guild_id: int, channel_id: int, message_id: int) -> str:
+    return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
 
 
 async def post_public_welcome(guild: discord.Guild, member: discord.Member):
@@ -273,6 +482,206 @@ async def resolve_ticket_owner_from_channel(channel: discord.TextChannel) -> dis
         print(f"[WARN] Error reading history in {channel.name}: {e}")
 
     return None
+
+
+async def get_ticket_owner(channel: discord.TextChannel) -> discord.Member | None:
+    row = await fetch_ticket_owner(channel.id)
+
+    if row is None:
+        owner = await resolve_ticket_owner_from_channel(channel)
+        if owner is None:
+            return None
+        await save_ticket_owner(channel.guild.id, channel.id, owner.id)
+        return owner
+
+    _guild_id, user_id = row
+    try:
+        member = channel.guild.get_member(user_id) or await channel.guild.fetch_member(user_id)
+        return member
+    except discord.NotFound:
+        return None
+    except discord.Forbidden:
+        return None
+    except discord.HTTPException:
+        return None
+
+
+async def build_confirm_view(channel_id: int, user_id: int):
+    return PhotoConfirmView(channel_id=channel_id, user_id=user_id)
+
+
+# ---------- Photo confirmation UI ----------
+class PhotoConfirmView(discord.ui.View):
+    def __init__(self, channel_id: int, user_id: int):
+        super().__init__(timeout=PHOTO_SESSION_TIMEOUT_SECONDS)
+        self.channel_id = channel_id
+        self.user_id = user_id
+
+    @discord.ui.button(label="✅ Confirm Screenshots", style=discord.ButtonStyle.success)
+    async def confirm_screenshots(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "❌ Only the ticket owner can confirm these screenshots.",
+                ephemeral=True
+            )
+            return
+
+        if not isinstance(interaction.channel, discord.TextChannel):
+            await interaction.response.send_message(
+                "❌ This confirmation must be used inside the ticket channel.",
+                ephemeral=True
+            )
+            return
+
+        session = await fetch_photo_session(interaction.channel.id)
+        if session is None:
+            await interaction.response.send_message(
+                "❌ No active photo session was found. Please run /photos again.",
+                ephemeral=True
+            )
+            return
+
+        if session["status"] not in ("awaiting_confirmation", "confirmed", "logged"):
+            await interaction.response.send_message(
+                "❌ This photo session is not ready for confirmation.",
+                ephemeral=True
+            )
+            return
+
+        if session["status"] == "logged":
+            await interaction.response.send_message(
+                "✅ These screenshots have already been confirmed and logged.",
+                ephemeral=True
+            )
+            return
+
+        confirmed_at = int(time.time())
+        await mark_photo_session_confirmed(interaction.channel.id, confirmed_at)
+
+        log_channel = interaction.guild.get_channel(PERFORMANCE_PROOF_LOG_CHANNEL_ID)
+        if not isinstance(log_channel, discord.TextChannel):
+            await interaction.response.send_message(
+                "❌ Proof log channel not found. Ask staff to check PERFORMANCE_PROOF_LOG_CHANNEL_ID.",
+                ephemeral=True
+            )
+            return
+
+        embed = discord.Embed(
+            title="Performance Proof Logged",
+            description="Customer confirmed ownership of screenshots and satisfaction with the performance difference shown.",
+            colour=discord.Colour.green(),
+            timestamp=discord.utils.utcnow()
+        )
+        embed.add_field(
+            name="Customer",
+            value=f"{interaction.user.mention}\n`{interaction.user.id}`",
+            inline=True
+        )
+        embed.add_field(
+            name="Ticket",
+            value=f"{interaction.channel.mention}\n`{interaction.channel.id}`",
+            inline=True
+        )
+        embed.add_field(
+            name="Channel Name",
+            value=interaction.channel.name,
+            inline=True
+        )
+        embed.add_field(
+            name="Screenshot 1",
+            value=(
+                f"[Original Message]({jump_url(interaction.guild.id, interaction.channel.id, session['screenshot1_message_id'])})\n"
+                f"[Original Attachment]({session['screenshot1_url']})\n"
+                f"Uploaded: {ts_to_discord_relative(session['screenshot1_ts'])}"
+            ),
+            inline=False
+        )
+        embed.add_field(
+            name="Screenshot 2",
+            value=(
+                f"[Original Message]({jump_url(interaction.guild.id, interaction.channel.id, session['screenshot2_message_id'])})\n"
+                f"[Original Attachment]({session['screenshot2_url']})\n"
+                f"Uploaded: {ts_to_discord_relative(session['screenshot2_ts'])}"
+            ),
+            inline=False
+        )
+        embed.add_field(
+            name="Confirmation",
+            value=(
+                f"[Confirmation Message]({jump_url(interaction.guild.id, interaction.channel.id, session['confirm_message_id'])})\n"
+                f"Confirmed: {ts_to_discord_relative(confirmed_at)}"
+            ),
+            inline=False
+        )
+        embed.set_footer(text="MaxFramesGained Performance Proof System")
+
+        # Safer approach: send URLs even if file re-upload fails
+        try:
+            log_message = await log_channel.send(embed=embed)
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "❌ I do not have permission to post in the proof log channel.",
+                ephemeral=True
+            )
+            return
+        except discord.HTTPException as e:
+            await interaction.response.send_message(
+                f"❌ Failed to log proof: {e}",
+                ephemeral=True
+            )
+            return
+
+        # Re-post the screenshots clearly underneath the embed
+        try:
+            await log_channel.send(
+                content=(
+                    f"**Screenshot 1:** {session['screenshot1_filename'] or 'image'}\n"
+                    f"{session['screenshot1_url']}\n\n"
+                    f"**Screenshot 2:** {session['screenshot2_filename'] or 'image'}\n"
+                    f"{session['screenshot2_url']}"
+                )
+            )
+        except discord.HTTPException:
+            pass
+
+        await save_performance_proof_log(
+            guild_id=interaction.guild.id,
+            channel_id=interaction.channel.id,
+            user_id=interaction.user.id,
+            confirm_message_id=session["confirm_message_id"],
+            screenshot1_message_id=session["screenshot1_message_id"],
+            screenshot2_message_id=session["screenshot2_message_id"],
+            screenshot1_url=session["screenshot1_url"],
+            screenshot2_url=session["screenshot2_url"],
+            screenshot1_filename=session["screenshot1_filename"] or "",
+            screenshot2_filename=session["screenshot2_filename"] or "",
+            screenshot1_ts=session["screenshot1_ts"],
+            screenshot2_ts=session["screenshot2_ts"],
+            confirmed_at=confirmed_at,
+            log_message_id=log_message.id,
+        )
+        await mark_photo_session_logged(interaction.channel.id, log_message.id)
+
+        for child in self.children:
+            child.disabled = True
+
+        try:
+            await interaction.response.edit_message(
+                content=(
+                    "✅ **Screenshots confirmed and logged.**\n\n"
+                    "Thank you. Your screenshots, timestamps, original message links, and confirmation have now been securely logged."
+                ),
+                view=self
+            )
+        except discord.HTTPException:
+            await interaction.response.send_message(
+                "✅ Screenshots confirmed and logged.",
+                ephemeral=True
+            )
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
 
 
 # ---------- Events ----------
@@ -361,6 +770,79 @@ async def on_guild_channel_delete(channel: discord.abc.GuildChannel):
         print(f"[DEBUG] Deleted stored ticket owner mapping for channel {channel.id}")
 
     await delete_completed_ticket(channel.id)
+    await delete_photo_session(channel.id)
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    await bot.process_commands(message)
+
+    if message.author.bot:
+        return
+
+    if not isinstance(message.channel, discord.TextChannel):
+        return
+
+    if not looks_like_ticket_channel(message.channel.name):
+        return
+
+    session = await fetch_photo_session(message.channel.id)
+    if session is None:
+        return
+
+    if session["status"] != "awaiting_uploads":
+        return
+
+    if message.author.id != session["user_id"]:
+        return
+
+    image_attachments = [att for att in message.attachments if is_image_attachment(att)]
+    if not image_attachments:
+        return
+
+    current_count = 0
+    if session["screenshot1_message_id"]:
+        current_count += 1
+    if session["screenshot2_message_id"]:
+        current_count += 1
+
+    for att in image_attachments:
+        if current_count >= 2:
+            break
+
+        if current_count == 0:
+            await update_photo_session_first(
+                message.channel.id,
+                message.id,
+                att.url,
+                att.filename,
+                int(message.created_at.timestamp())
+            )
+            current_count += 1
+        elif current_count == 1:
+            await update_photo_session_second(
+                message.channel.id,
+                message.id,
+                att.url,
+                att.filename,
+                int(message.created_at.timestamp())
+            )
+            current_count += 1
+
+    session = await fetch_photo_session(message.channel.id)
+    if session and session["screenshot1_message_id"] and session["screenshot2_message_id"] and session["status"] == "awaiting_uploads":
+        view = await build_confirm_view(message.channel.id, session["user_id"])
+        confirm_msg = await message.channel.send(
+            f"<@{session['user_id']}>\n"
+            "✅ I’ve detected **2 screenshots**.\n\n"
+            "**Please confirm the following by clicking the green button below:**\n"
+            "• these screenshots were provided by you\n"
+            "• they are from your system\n"
+            "• you are satisfied with the performance difference shown\n\n"
+            "Once confirmed, the screenshots, timestamps, and original message links will be logged privately.",
+            view=view
+        )
+        await set_photo_session_confirm_prompt(message.channel.id, confirm_msg.id)
 
 
 # ---------- Slash Commands ----------
@@ -534,6 +1016,71 @@ async def complete(interaction: discord.Interaction):
     await interaction.followup.send("✅ Completion recorded and 7-day timer started.", ephemeral=True)
 
 
+@bot.tree.command(name="photos", description="Start the performance screenshot confirmation flow for this ticket")
+async def photos(interaction: discord.Interaction):
+    if not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message(
+            "❌ This command must be used inside a ticket channel.",
+            ephemeral=True
+        )
+        return
+
+    if not looks_like_ticket_channel(interaction.channel.name):
+        await interaction.response.send_message(
+            "❌ This command can only be used inside a ticket channel.",
+            ephemeral=True
+        )
+        return
+
+    owner = await get_ticket_owner(interaction.channel)
+    if owner is None:
+        await interaction.response.send_message(
+            "❌ Could not determine the ticket owner for this channel.",
+            ephemeral=True
+        )
+        return
+
+    if interaction.user.id != owner.id:
+        await interaction.response.send_message(
+            f"❌ Only the ticket owner ({owner.mention}) can start the photo confirmation flow.",
+            ephemeral=True
+        )
+        return
+
+    existing = await fetch_photo_session(interaction.channel.id)
+    if existing and existing["status"] in ("awaiting_uploads", "awaiting_confirmation"):
+        await interaction.response.send_message(
+            "❌ A photo submission is already in progress in this ticket.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(ephemeral=False)
+
+    prompt = await interaction.channel.send(
+        f"{owner.mention}\n"
+        "**Performance Proof Submission Started**\n\n"
+        "Please upload **exactly 2 screenshots** in this ticket:\n"
+        "• your first performance screenshot\n"
+        "• your second performance screenshot\n\n"
+        "Once 2 screenshots are detected from your account, I will ask you to confirm them.\n\n"
+        "⚠️ Only screenshots uploaded by the ticket owner will count.\n"
+        f"⚠️ This request will time out after {PHOTO_SESSION_TIMEOUT_SECONDS // 60} minutes if not completed."
+    )
+
+    await upsert_photo_session(
+        guild_id=interaction.guild.id,
+        channel_id=interaction.channel.id,
+        user_id=owner.id,
+        prompt_message_id=prompt.id
+    )
+
+    await interaction.followup.send(
+        "✅ Screenshot submission started.",
+        ephemeral=True
+    )
+
+
 @booked.error
 async def booked_error(interaction: discord.Interaction, error):
     if isinstance(error, app_commands.errors.MissingPermissions):
@@ -584,6 +1131,20 @@ async def complete_error(interaction: discord.Interaction, error):
                 f"❌ An error occurred: {error}",
                 ephemeral=True
             )
+
+
+@photos.error
+async def photos_error(interaction: discord.Interaction, error):
+    if interaction.response.is_done():
+        await interaction.followup.send(
+            f"❌ An error occurred: {error}",
+            ephemeral=True
+        )
+    else:
+        await interaction.response.send_message(
+            f"❌ An error occurred: {error}",
+            ephemeral=True
+        )
 
 
 # ---------- Timer loops ----------
