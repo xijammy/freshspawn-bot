@@ -192,7 +192,7 @@ async def delete_ticket_owner(channel_id: int):
         await db.commit()
 
 
-async def save_completed_ticket(guild_id: int, channel_id: int, user_id: int):
+async def save_d_ticket(guild_id: int, channel_id: int, user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             INSERT INTO completed_tickets (channel_id, guild_id, user_id, completed_at, reminded, finalised)
@@ -1058,7 +1058,31 @@ async def complete(interaction: discord.Interaction):
         )
         return
 
-    await save_completed_ticket(guild.id, interaction.channel.id, member.id)
+await save_completed_ticket(guild.id, interaction.channel.id, member.id)
+
+# 🔽 MOVE TO COMPLETED CATEGORY
+completed_category = guild.get_channel(COMPLETED_CATEGORY_ID)
+
+if isinstance(completed_category, discord.CategoryChannel):
+    try:
+        await interaction.channel.edit(
+            category=completed_category,
+            sync_permissions=False,  # IMPORTANT
+            reason="Moved to completed tickets"
+        )
+
+        # Ensure ONLY the ticket owner + staff can see it
+        await interaction.channel.set_permissions(
+            member,
+            view_channel=True,
+            send_messages=True,
+            read_message_history=True
+        )
+
+    except discord.Forbidden:
+        print(f"[WARN] Missing permission to move channel {interaction.channel.id}")
+    except discord.HTTPException as e:
+        print(f"[WARN] Failed to move channel: {e}")
 
     await interaction.channel.send(
         f"{member.mention}\n"
