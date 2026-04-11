@@ -34,6 +34,10 @@ DB_PATH = "data.db"
 POST_SERVICE_REVIEW_SECONDS = 7 * 24 * 3600
 POST_SERVICE_FINAL_WARNING_SECONDS = 12 * 3600
 PHOTO_SESSION_TIMEOUT_SECONDS = 15 * 60
+TERMS_VIEW_TIMEOUT_SECONDS = 15 * 60
+
+TERMS_LOG_CHANNEL_ID = 1491874696222867517
+FULL_TERMS_CHANNEL_ID = 1491874696222867517
 
 WELCOME_TEXT = (
     "Thank you for joining the server, please go to "
@@ -123,6 +127,18 @@ async def init_db():
                 confirmed_at           INTEGER NOT NULL,
                 logged_at              INTEGER NOT NULL,
                 log_message_id         INTEGER
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS terms_acceptances (
+                channel_id          INTEGER NOT NULL PRIMARY KEY,
+                guild_id            INTEGER NOT NULL,
+                user_id             INTEGER NOT NULL,
+                terms_message_id    INTEGER NOT NULL,
+                accepted_at         INTEGER,
+                accepted_by_user_id INTEGER,
+                accepted_by_name    TEXT,
+                log_message_id      INTEGER
             )
         """)
         await db.commit()
@@ -241,6 +257,66 @@ async def delete_completed_ticket(channel_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             DELETE FROM completed_tickets
+            WHERE channel_id=?
+        """, (channel_id,))
+        await db.commit()
+
+
+# ---------- Terms DB ----------
+async def upsert_terms_acceptance(guild_id: int, channel_id: int, user_id: int, terms_message_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            INSERT INTO terms_acceptances (
+                channel_id, guild_id, user_id, terms_message_id,
+                accepted_at, accepted_by_user_id, accepted_by_name, log_message_id
+            )
+            VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL)
+            ON CONFLICT(channel_id) DO UPDATE SET
+                guild_id=excluded.guild_id,
+                user_id=excluded.user_id,
+                terms_message_id=excluded.terms_message_id,
+                accepted_at=NULL,
+                accepted_by_user_id=NULL,
+                accepted_by_name=NULL,
+                log_message_id=NULL
+        """, (channel_id, guild_id, user_id, terms_message_id))
+        await db.commit()
+
+
+async def fetch_terms_acceptance(channel_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("""
+            SELECT *
+            FROM terms_acceptances
+            WHERE channel_id=?
+        """, (channel_id,))
+        return await cur.fetchone()
+
+
+async def mark_terms_accepted(
+    channel_id: int,
+    accepted_at: int,
+    accepted_by_user_id: int,
+    accepted_by_name: str,
+    log_message_id: int | None,
+):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            UPDATE terms_acceptances
+            SET accepted_at=?,
+                accepted_by_user_id=?,
+                accepted_by_name=?,
+                log_message_id=?
+            WHERE channel_id=?
+        """, (accepted_at, accepted_by_user_id, accepted_by_name, log_message_id, channel_id))
+        await db.commit()
+
+
+async def delete_terms_acceptance(channel_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            DELETE FROM terms_acceptances
             WHERE channel_id=?
         """, (channel_id,))
         await db.commit()
@@ -540,6 +616,10 @@ async def build_confirm_view(channel_id: int, user_id: int):
     return PhotoConfirmView(channel_id=channel_id, user_id=user_id)
 
 
+async def build_terms_view(channel_id: int, user_id: int):
+    return TermsAcceptView(channel_id=channel_id, user_id=user_id)
+
+
 # ---------- Photo confirmation UI ----------
 class PhotoConfirmView(discord.ui.View):
     def __init__(self, channel_id: int, user_id: int):
@@ -585,7 +665,6 @@ class PhotoConfirmView(discord.ui.View):
             )
             return
 
-        # Acknowledge immediately so Discord doesn't time out the interaction
         await interaction.response.defer()
 
         confirmed_at = int(time.time())
@@ -744,6 +823,143 @@ class PhotoConfirmView(discord.ui.View):
             child.disabled = True
 
 
+# ---------- Terms acceptance UI ----------
+class TermsAcceptView(discord.ui.View):
+    def __init__(self, channel_id: int, user_id: int):
+        super().__init__(timeout=TERMS_VIEW_TIMEOUT_SECONDS)
+        self.channel_id = channel_id
+        self.user_id = user_id
+
+    @discord.ui.button(label="✅ I Acknowledge and Agree", style=discord.ButtonStyle.success)
+    async def accept_terms(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "❌ Only the ticket owner can accept these terms.",
+                ephemeral=True
+            )
+            return
+
+        if not isinstance(interaction.channel, discord.TextChannel):
+            await interaction.response.send_message(
+                "❌ This confirmation must be used inside the ticket channel.",
+                ephemeral=True
+            )
+            return
+
+        row = await fetch_terms_acceptance(interaction.channel.id)
+        if row is None:
+            await interaction.response.send_message(
+                "❌ No active terms message was found in this ticket. Please run /terms again.",
+                ephemeral=True
+            )
+            return
+
+        if row["accepted_at"] is not None:
+            await interaction.response.send_message(
+                "✅ These terms have already been accepted in this ticket.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.defer()
+
+        accepted_at = int(time.time())
+        accepted_str = ts_to_plain_utc(accepted_at)
+        accepter_text = f"{interaction.user} ({interaction.user.id})"
+
+        log_message_id = None
+        log_channel = interaction.guild.get_channel(TERMS_LOG_CHANNEL_ID)
+
+        if isinstance(log_channel, discord.TextChannel):
+            embed = discord.Embed(
+                title="Pre-Booking Risk Acknowledgement Logged",
+                description="Customer accepted the pre-booking risk acknowledgement.",
+                colour=discord.Colour.orange(),
+                timestamp=discord.utils.utcnow()
+            )
+            embed.add_field(
+                name="Customer",
+                value=f"{interaction.user.mention}\n`{interaction.user.id}`",
+                inline=True
+            )
+            embed.add_field(
+                name="Accepted By",
+                value=f"{interaction.user.mention}\n`{interaction.user}`\n`{interaction.user.id}`",
+                inline=True
+            )
+            embed.add_field(
+                name="Ticket",
+                value=f"{interaction.channel.mention}\n`{interaction.channel.id}`",
+                inline=True
+            )
+            embed.add_field(
+                name="Terms Message",
+                value=f"[Jump to Message]({jump_url(interaction.guild.id, interaction.channel.id, row['terms_message_id'])})",
+                inline=False
+            )
+            embed.add_field(
+                name="Accepted At",
+                value=accepted_str,
+                inline=False
+            )
+            embed.add_field(
+                name="Accepted Text",
+                value=(
+                    "Customer confirmed that, to the best of their knowledge, neither the system nor any of its "
+                    "components have previously been used in connection with cheating, spoofing, ban evasion, or similar activity. "
+                    "Customer also acknowledged that access issues affecting features such as Call of Duty: Ranked Play may be caused "
+                    "by pre-existing restrictions outside of our control and would not be grounds for a refund where not created by our service."
+                ),
+                inline=False
+            )
+            try:
+                log_message = await log_channel.send(embed=embed)
+                log_message_id = log_message.id
+            except discord.HTTPException as e:
+                print(f"[WARN] Failed to log terms acceptance: {e}")
+
+        await mark_terms_accepted(
+            interaction.channel.id,
+            accepted_at,
+            interaction.user.id,
+            str(interaction.user),
+            log_message_id
+        )
+
+        for child in self.children:
+            child.disabled = True
+
+        try:
+            await interaction.message.edit(
+                content=(
+                    "⚠️ **Pre-Booking Risk Acknowledgement**\n\n"
+                    "Before your optimisation takes place, please read the below carefully.\n\n"
+                    "By clicking the button below, you confirm that to the best of your knowledge, neither this system nor any of its "
+                    "components have previously been used in connection with cheating, spoofing, ban evasion, or similar activity.\n\n"
+                    "You also acknowledge that if you are attempting to access features such as Call of Duty: Ranked Play, and the "
+                    "standard optimisation or troubleshooting process does not resolve access, this may indicate a pre-existing restriction "
+                    "affecting the system, hardware, or account which is outside of our control.\n\n"
+                    "Where an issue is caused by a pre-existing restriction not created by our service, this will not be grounds for a refund.\n\n"
+                    f"You must also review and accept the full optimisation warranty and terms here:\n<#${FULL_TERMS_CHANNEL_ID}>"
+                    "\n\n"
+                    f"✅ **Accepted on** {accepted_str}\n"
+                    f"**Accepted by:** `{accepter_text}`"
+                ).replace("<#$", "<#"),
+                view=self
+            )
+        except discord.HTTPException as e:
+            print(f"[WARN] Failed to edit terms message: {e}")
+
+        await interaction.followup.send(
+            "✅ Terms acknowledgement accepted and logged.",
+            ephemeral=True
+        )
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+
+
 # ---------- Events ----------
 @bot.event
 async def on_ready():
@@ -831,6 +1047,7 @@ async def on_guild_channel_delete(channel: discord.abc.GuildChannel):
 
     await delete_completed_ticket(channel.id)
     await delete_photo_session(channel.id)
+    await delete_terms_acceptance(channel.id)
 
 
 @bot.event
@@ -898,8 +1115,10 @@ async def on_message(message: discord.Message):
             "**Please confirm the following by clicking the green button below:**\n"
             "• these screenshots were provided by you\n"
             "• they are from your system\n"
+            "• they accurately reflect the performance shown at the time they were taken\n"
+            "• you confirm the service has been delivered as described\n"
             "• you are satisfied with the performance difference shown\n\n"
-            "Once confirmed, the screenshots, timestamps, and original message links will be logged privately.",
+            "Once confirmed, the screenshots, timestamps, original message links, and your confirmation details will be logged privately.",
             view=view
         )
         await set_photo_session_confirm_prompt(message.channel.id, confirm_msg.id)
@@ -977,14 +1196,78 @@ async def booked(interaction: discord.Interaction):
         "✅ Your optimisation has now been successfully booked.\n\n"
         "You have now been given the **Booked Opti** role.\n\n"
         "Before your optimisation takes place, you must:\n"
-        "• Read and agree to <#1477342444822597776>\n"
-        "• Read and follow all required steps in <#1454148951644180573>\n\n"
-        "⚠️ You must agree to the warranty and terms before your optimisation takes place.\n"
-        "⚠️ You must also complete the optimisation steps beforehand to avoid delays or issues during the session."
+        "• Run `/terms` in this ticket and accept the pre-booking acknowledgement\n"
+        f"• Read and review the full terms here: <#{FULL_TERMS_CHANNEL_ID}>\n"
+        "• Read and follow all required prep steps in <#1454148951644180573>\n\n"
+        "⚠️ You must accept the terms and complete the required steps before your optimisation takes place."
     )
 
     await interaction.followup.send(
         "✅ User marked as booked and roles updated.",
+        ephemeral=True
+    )
+
+
+@bot.tree.command(name="terms", description="Show the pre-booking risk acknowledgement for this ticket")
+async def terms(interaction: discord.Interaction):
+    if not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message(
+            "❌ This command must be used inside a ticket channel.",
+            ephemeral=True
+        )
+        return
+
+    if not looks_like_ticket_channel(interaction.channel.name):
+        await interaction.response.send_message(
+            "❌ This command can only be used inside a ticket channel.",
+            ephemeral=True
+        )
+        return
+
+    owner = await get_ticket_owner(interaction.channel)
+    if owner is None:
+        await interaction.response.send_message(
+            "❌ Could not determine the ticket owner for this channel.",
+            ephemeral=True
+        )
+        return
+
+    existing = await fetch_terms_acceptance(interaction.channel.id)
+    if existing and existing["accepted_at"] is not None:
+        await interaction.response.send_message(
+            "✅ The pre-booking terms have already been accepted in this ticket.",
+            ephemeral=True
+        )
+        return
+
+    view = await build_terms_view(interaction.channel.id, owner.id)
+
+    await interaction.response.defer(ephemeral=False)
+
+    msg = await interaction.channel.send(
+        f"{owner.mention}\n"
+        "⚠️ **Pre-Booking Risk Acknowledgement**\n\n"
+        "Before your optimisation takes place, please read the below carefully.\n\n"
+        "By clicking the button below, you confirm that to the best of your knowledge, neither this system nor any of its "
+        "components have previously been used in connection with cheating, spoofing, ban evasion, or similar activity.\n\n"
+        "You also acknowledge that if you are attempting to access features such as Call of Duty: Ranked Play, and the "
+        "standard optimisation or troubleshooting process does not resolve access, this may indicate a pre-existing restriction "
+        "affecting the system, hardware, or account which is outside of our control.\n\n"
+        "Where an issue is caused by a pre-existing restriction not created by our service, this will not be grounds for a refund.\n\n"
+        f"You must also review and accept the full optimisation warranty and terms here:\n<#{FULL_TERMS_CHANNEL_ID}>\n\n"
+        "Click the button below only if you understand and agree.",
+        view=view
+    )
+
+    await upsert_terms_acceptance(
+        interaction.guild.id,
+        interaction.channel.id,
+        owner.id,
+        msg.id
+    )
+
+    await interaction.followup.send(
+        "✅ Terms acknowledgement posted.",
         ephemeral=True
     )
 
@@ -1061,7 +1344,6 @@ async def complete(interaction: discord.Interaction):
 
     await save_completed_ticket(guild.id, interaction.channel.id, member.id)
 
-    # Move to completed category
     completed_category = guild.get_channel(COMPLETED_CATEGORY_ID)
 
     if isinstance(completed_category, discord.CategoryChannel):
@@ -1072,7 +1354,6 @@ async def complete(interaction: discord.Interaction):
                 reason="Moved to completed tickets"
             )
 
-            # Ensure only the ticket owner + staff can still access it
             await interaction.channel.set_permissions(
                 member,
                 view_channel=True,
@@ -1080,7 +1361,6 @@ async def complete(interaction: discord.Interaction):
                 read_message_history=True
             )
 
-            # Extra safety: hide from @everyone
             await interaction.channel.set_permissions(
                 guild.default_role,
                 view_channel=False
@@ -1107,6 +1387,8 @@ async def complete(interaction: discord.Interaction):
         "✅ Completion recorded, ticket moved, and 7-day timer started.",
         ephemeral=True
     )
+
+
 @bot.tree.command(name="photos", description="Start the performance screenshot confirmation flow for this ticket")
 async def photos(interaction: discord.Interaction):
     if not isinstance(interaction.channel, discord.TextChannel):
@@ -1196,6 +1478,20 @@ async def booked_error(interaction: discord.Interaction, error):
                 f"❌ An error occurred: {error}",
                 ephemeral=True
             )
+
+
+@terms.error
+async def terms_error(interaction: discord.Interaction, error):
+    if interaction.response.is_done():
+        await interaction.followup.send(
+            f"❌ An error occurred: {error}",
+            ephemeral=True
+        )
+    else:
+        await interaction.response.send_message(
+            f"❌ An error occurred: {error}",
+            ephemeral=True
+        )
 
 
 @complete.error
