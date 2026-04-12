@@ -826,7 +826,7 @@ class PhotoConfirmView(discord.ui.View):
 # ---------- Terms acceptance UI ----------
 class TermsAcceptView(discord.ui.View):
     def __init__(self, channel_id: int, user_id: int):
-        super().__init__(timeout=TERMS_VIEW_TIMEOUT_SECONDS)
+        super().__init__(timeout=None)
         self.channel_id = channel_id
         self.user_id = user_id
 
