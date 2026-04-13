@@ -13,6 +13,7 @@ from discord import app_commands
 
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
 
+COMPLETE_LOG_CHANNEL_ID = 1493316746088808508
 FRESH_SPAWNS_CHANNEL_ID = 1454402793157824603
 CREATE_TICKET_CHANNEL_ID = 986685464251609118
 POST_SERVICE_CHANNEL_ID = int(os.environ["POST_SERVICE_CHANNEL_ID"])
@@ -82,11 +83,11 @@ async def init_db():
             )
         """)
         await db.execute("""
-            CREATE TABLE IF NOT EXISTS completed_tickets (
+            CREATE TABLE IF NOT EXISTS d_tickets (
                 channel_id   INTEGER NOT NULL PRIMARY KEY,
                 guild_id     INTEGER NOT NULL,
                 user_id      INTEGER NOT NULL,
-                completed_at INTEGER NOT NULL,
+                d_at INTEGER NOT NULL,
                 reminded     INTEGER NOT NULL DEFAULT 0,
                 finalised    INTEGER NOT NULL DEFAULT 0
             )
@@ -226,54 +227,54 @@ async def delete_ticket_owner(channel_id: int):
         await db.commit()
 
 
-async def save_completed_ticket(guild_id: int, channel_id: int, user_id: int):
+async def save_d_ticket(guild_id: int, channel_id: int, user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
-            INSERT INTO completed_tickets (channel_id, guild_id, user_id, completed_at, reminded, finalised)
+            INSERT INTO d_tickets (channel_id, guild_id, user_id, d_at, reminded, finalised)
             VALUES (?, ?, ?, ?, 0, 0)
             ON CONFLICT(channel_id) DO UPDATE SET
                 guild_id=excluded.guild_id,
                 user_id=excluded.user_id,
-                completed_at=excluded.completed_at,
+                d_at=excluded.d_at,
                 reminded=0,
                 finalised=0
         """, (channel_id, guild_id, user_id, int(time.time())))
         await db.commit()
 
 
-async def fetch_completed_tickets():
+async def fetch_d_tickets():
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("""
-            SELECT channel_id, guild_id, user_id, completed_at, reminded, finalised
-            FROM completed_tickets
+            SELECT channel_id, guild_id, user_id, d_at, reminded, finalised
+            FROM d_tickets
         """)
         return await cur.fetchall()
 
 
-async def mark_completed_ticket_reminded(channel_id: int):
+async def mark_d_ticket_reminded(channel_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
-            UPDATE completed_tickets
+            UPDATE d_tickets
             SET reminded=1
             WHERE channel_id=?
         """, (channel_id,))
         await db.commit()
 
 
-async def mark_completed_ticket_finalised(channel_id: int):
+async def mark_d_ticket_finalised(channel_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
-            UPDATE completed_tickets
+            UPDATE d_tickets
             SET finalised=1
             WHERE channel_id=?
         """, (channel_id,))
         await db.commit()
 
 
-async def delete_completed_ticket(channel_id: int):
+async def delete_d_ticket(channel_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
-            DELETE FROM completed_tickets
+            DELETE FROM d_tickets
             WHERE channel_id=?
         """, (channel_id,))
         await db.commit()
@@ -836,7 +837,7 @@ async def handle_network_selection(interaction: discord.Interaction, service_key
 
     await update_ticket_intake_state(
         interaction.channel.id,
-        current_step="awaiting_network_completed_button",
+        current_step="awaiting_network_d_button",
         selected_reason="network_optimisation",
         selected_package=service_key,
         awaiting_reply=0
@@ -847,7 +848,7 @@ async def handle_network_selection(interaction: discord.Interaction, service_key
         ephemeral=True
     )
 
-    view = NetworkCompletedView(channel_id=interaction.channel.id, user_id=interaction.user.id)
+    view = NetworkdView(channel_id=interaction.channel.id, user_id=interaction.user.id)
     await interaction.channel.send(
         f"{interaction.user.mention}\n"
         f"**Selected Service:** {title}\n\n"
@@ -1963,6 +1964,36 @@ async def complete(interaction: discord.Interaction):
         "If no issues are raised within the review period, and you do not complete the confirmation within the additional 12-hour reminder window, the service will be considered **accepted and completed**, the relevant role will be assigned, and the ticket may then be closed.\n\n"
         "⚠️ Do not private message staff regarding support. Use this ticket only."
     )
+
+    complete_log_channel = guild.get_channel(COMPLETE_LOG_CHANNEL_ID)
+
+    if isinstance(complete_log_channel, discord.TextChannel):
+        embed = discord.Embed(
+            title="Completion Logged",
+            description="A ticket has been marked complete and is eligible for a review DM.",
+            colour=discord.Colour.green(),
+            timestamp=discord.utils.utcnow()
+        )
+        embed.add_field(
+            name="User",
+            value=f"{member.mention}\n`{member.id}`",
+            inline=False
+        )
+        embed.add_field(
+            name="Ticket",
+            value=f"{interaction.channel.name}\n`{interaction.channel.id}`",
+            inline=False
+        )
+        embed.add_field(
+            name="Completed By",
+            value=f"{interaction.user.mention}\n`{interaction.user.id}`",
+            inline=False
+        )
+
+        try:
+            await complete_log_channel.send(embed=embed)
+        except discord.HTTPException as e:
+            print(f"[WARN] Failed to send completion log embed: {e}")
 
     await interaction.followup.send(
         "✅ Completion recorded, ticket moved, and 7-day timer started.",
