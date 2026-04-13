@@ -819,11 +819,12 @@ async def handle_optimisation_selection(interaction: discord.Interaction, packag
         "• GPU\n"
         "• Motherboard\n"
         "• RAM\n"
-        "• Storage\n"
+        "• Cooler\n"
         "• PSU\n"
-        "• Cooling setup\n"
-        "• Current Windows version / custom OS status\n"
-        "• Main game(s) you want tuned\n\n"
+        "• If you're unsure about any of these then please make it known\n"
+      
+        "• Has your PC been previously optimised or have you made any registry edits or used an scripts to your knowledge? If so a fresh install of windows will have to be carried out. If you choose not to, then the warranty will not apply to yourself as we don't know the prior condition of the OS. If you choose not to have a fresh install and during the optimisation something corrupts then you will have to pay a fee of £50 for a fresh install or the service will be terminated and no refund given as this is a choice made by yourself prior to booking.\n"
+        
         "Once you reply, I’ll post the pre-booking risk acknowledgement for you to accept."
     )
 
