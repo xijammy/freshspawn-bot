@@ -36,7 +36,7 @@ DB_PATH = "data.db"
 POST_SERVICE_REVIEW_SECONDS = 7 * 24 * 3600
 POST_SERVICE_FINAL_WARNING_SECONDS = 12 * 3600
 PHOTO_SESSION_TIMEOUT_SECONDS = 15 * 60
-TERMS_VIEW_TIMEOUT_SECONDS = 15 * 60
+TERMS_VIEW_TIMEOUT_SECONDS = 60 * 60
 
 TERMS_LOG_CHANNEL_ID = 1477346730864410664
 FULL_TERMS_CHANNEL_ID = 1477342444822597776
@@ -46,7 +46,7 @@ WELCOME_TEXT = (
     "Thank you for joining the server, please go to "
     f"<#{CREATE_TICKET_CHANNEL_ID}> to book an optimisation. "
     "If a ticket has not been created in the next 24 hours then you will be automatically kicked "
-    "and you will need to rejoin once you are ready to purchase. Please DO NOT FORGET to read the ❗PLEASE READ❗ Category especially if booking an Optimisation"
+    "and you will need to rejoin once you are ready to purchase. Please DO NOT FORGET to read the ❗PLEASE READ❗ Category especially if booking an Optimisation. Make sure you click each prompt when you create a ticket or else you will be kicked."
 )
 
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif")
