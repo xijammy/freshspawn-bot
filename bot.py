@@ -3,6 +3,8 @@ import re
 import time
 import io
 import asyncio
+from typing import Optional
+
 import aiohttp
 import aiosqlite
 import discord
@@ -38,6 +40,7 @@ TERMS_VIEW_TIMEOUT_SECONDS = 15 * 60
 
 TERMS_LOG_CHANNEL_ID = 1477346730864410664
 FULL_TERMS_CHANNEL_ID = 1477342444822597776
+OPTI_STEPS_CHANNEL_ID = 1454148951644180573
 
 WELCOME_TEXT = (
     "Thank you for joining the server, please go to "
@@ -56,7 +59,9 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
-# ---------- DB ----------
+# =========================
+# Database
+# =========================
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
@@ -139,6 +144,18 @@ async def init_db():
                 accepted_by_user_id INTEGER,
                 accepted_by_name    TEXT,
                 log_message_id      INTEGER
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS ticket_intake_states (
+                channel_id       INTEGER NOT NULL PRIMARY KEY,
+                guild_id         INTEGER NOT NULL,
+                user_id          INTEGER NOT NULL,
+                current_step     TEXT,
+                selected_reason  TEXT,
+                selected_package TEXT,
+                awaiting_reply   INTEGER NOT NULL DEFAULT 0,
+                updated_at       INTEGER NOT NULL
             )
         """)
         await db.commit()
@@ -299,7 +316,7 @@ async def mark_terms_accepted(
     accepted_at: int,
     accepted_by_user_id: int,
     accepted_by_name: str,
-    log_message_id: int | None,
+    log_message_id: Optional[int],
 ):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
@@ -323,7 +340,7 @@ async def delete_terms_acceptance(channel_id: int):
 
 
 # ---------- Photo session DB ----------
-async def upsert_photo_session(guild_id: int, channel_id: int, user_id: int, prompt_message_id: int | None):
+async def upsert_photo_session(guild_id: int, channel_id: int, user_id: int, prompt_message_id: Optional[int]):
     now_ts = int(time.time())
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
@@ -450,7 +467,7 @@ async def save_performance_proof_log(
     screenshot1_ts: int,
     screenshot2_ts: int,
     confirmed_at: int,
-    log_message_id: int | None,
+    log_message_id: Optional[int],
 ):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
@@ -478,7 +495,90 @@ async def save_performance_proof_log(
         await db.commit()
 
 
-# ---------- Helpers ----------
+# ---------- Ticket intake DB ----------
+async def upsert_ticket_intake_state(
+    guild_id: int,
+    channel_id: int,
+    user_id: int,
+    current_step: Optional[str],
+    selected_reason: Optional[str] = None,
+    selected_package: Optional[str] = None,
+    awaiting_reply: int = 0,
+):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            INSERT INTO ticket_intake_states (
+                channel_id, guild_id, user_id, current_step,
+                selected_reason, selected_package, awaiting_reply, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(channel_id) DO UPDATE SET
+                guild_id=excluded.guild_id,
+                user_id=excluded.user_id,
+                current_step=excluded.current_step,
+                selected_reason=COALESCE(excluded.selected_reason, ticket_intake_states.selected_reason),
+                selected_package=COALESCE(excluded.selected_package, ticket_intake_states.selected_package),
+                awaiting_reply=excluded.awaiting_reply,
+                updated_at=excluded.updated_at
+        """, (
+            channel_id, guild_id, user_id, current_step,
+            selected_reason, selected_package, awaiting_reply, int(time.time())
+        ))
+        await db.commit()
+
+
+async def fetch_ticket_intake_state(channel_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("""
+            SELECT *
+            FROM ticket_intake_states
+            WHERE channel_id=?
+        """, (channel_id,))
+        return await cur.fetchone()
+
+
+async def update_ticket_intake_state(
+    channel_id: int,
+    current_step: Optional[str] = None,
+    selected_reason: Optional[str] = None,
+    selected_package: Optional[str] = None,
+    awaiting_reply: Optional[int] = None,
+):
+    state = await fetch_ticket_intake_state(channel_id)
+    if state is None:
+        return
+
+    new_step = state["current_step"] if current_step is None else current_step
+    new_reason = state["selected_reason"] if selected_reason is None else selected_reason
+    new_package = state["selected_package"] if selected_package is None else selected_package
+    new_awaiting = state["awaiting_reply"] if awaiting_reply is None else awaiting_reply
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            UPDATE ticket_intake_states
+            SET current_step=?,
+                selected_reason=?,
+                selected_package=?,
+                awaiting_reply=?,
+                updated_at=?
+            WHERE channel_id=?
+        """, (new_step, new_reason, new_package, new_awaiting, int(time.time()), channel_id))
+        await db.commit()
+
+
+async def delete_ticket_intake_state(channel_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            DELETE FROM ticket_intake_states
+            WHERE channel_id=?
+        """, (channel_id,))
+        await db.commit()
+
+
+# =========================
+# Helpers
+# =========================
 def has_only_role(member: discord.Member, role: discord.Role) -> bool:
     real_roles = [r for r in member.roles if r != member.guild.default_role]
     return len(real_roles) == 1 and real_roles[0].id == role.id
@@ -507,7 +607,7 @@ def jump_url(guild_id: int, channel_id: int, message_id: int) -> str:
     return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
 
 
-async def download_discord_file(url: str, filename: str) -> discord.File | None:
+async def download_discord_file(url: str, filename: str) -> Optional[discord.File]:
     try:
         timeout = aiohttp.ClientTimeout(total=20)
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -568,7 +668,7 @@ async def remove_enquired_role(member: discord.Member):
         print(f"[INFO] {member} ({member.id}) did not have enquired role at deletion time.")
 
 
-async def resolve_ticket_owner_from_channel(channel: discord.TextChannel) -> discord.Member | None:
+async def resolve_ticket_owner_from_channel(channel: discord.TextChannel) -> Optional[discord.Member]:
     await asyncio.sleep(2)
 
     try:
@@ -590,7 +690,7 @@ async def resolve_ticket_owner_from_channel(channel: discord.TextChannel) -> dis
     return None
 
 
-async def get_ticket_owner(channel: discord.TextChannel) -> discord.Member | None:
+async def get_ticket_owner(channel: discord.TextChannel) -> Optional[discord.Member]:
     row = await fetch_ticket_owner(channel.id)
 
     if row is None:
@@ -604,11 +704,7 @@ async def get_ticket_owner(channel: discord.TextChannel) -> discord.Member | Non
     try:
         member = channel.guild.get_member(user_id) or await channel.guild.fetch_member(user_id)
         return member
-    except discord.NotFound:
-        return None
-    except discord.Forbidden:
-        return None
-    except discord.HTTPException:
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
         return None
 
 
@@ -620,7 +716,438 @@ async def build_terms_view(channel_id: int, user_id: int):
     return TermsAcceptView(channel_id=channel_id, user_id=user_id)
 
 
-# ---------- Photo confirmation UI ----------
+async def ensure_ticket_owner_only(interaction: discord.Interaction, expected_user_id: int) -> bool:
+    if interaction.user.id != expected_user_id:
+        await interaction.response.send_message(
+            "❌ Only the ticket owner can use this option.",
+            ephemeral=True
+        )
+        return False
+
+    if not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message(
+            "❌ This must be used inside the ticket channel.",
+            ephemeral=True
+        )
+        return False
+
+    return True
+
+
+async def post_terms_message(channel: discord.TextChannel, owner: discord.Member) -> bool:
+    existing = await fetch_terms_acceptance(channel.id)
+    if existing and existing["accepted_at"] is not None:
+        await channel.send(
+            f"{owner.mention}\n"
+            "✅ Your pre-booking risk acknowledgement has already been accepted in this ticket.\n\n"
+            f"Please also ensure you have reviewed the full warranty and terms here: <#{FULL_TERMS_CHANNEL_ID}>"
+        )
+        return False
+
+    view = await build_terms_view(channel.id, owner.id)
+
+    msg = await channel.send(
+        f"{owner.mention}\n"
+        "⚠️ **Pre-Booking Risk Acknowledgement**\n\n"
+        "Before your optimisation takes place, please read the below carefully.\n\n"
+        "By clicking the button below, you confirm that to the best of your knowledge, neither this system nor any of its "
+        "components have previously been used in connection with cheating, spoofing, ban evasion, or similar activity.\n\n"
+        "You also acknowledge that if you are attempting to access features such as Call of Duty: Ranked Play, and the "
+        "standard optimisation or troubleshooting process does not resolve access, this may indicate a pre-existing restriction "
+        "affecting the system, hardware, or account which is outside of our control.\n\n"
+        "Where an issue is caused by a pre-existing restriction not created by our service, this will not be grounds for a refund.\n\n"
+        f"You must also review and accept the full optimisation warranty and terms here:\n<#{FULL_TERMS_CHANNEL_ID}>\n\n"
+        "Click the button below only if you understand and agree.",
+        view=view
+    )
+
+    await upsert_terms_acceptance(channel.guild.id, channel.id, owner.id, msg.id)
+    return True
+
+
+async def start_ticket_intake_flow(channel: discord.TextChannel, owner: discord.Member):
+    await upsert_ticket_intake_state(
+        guild_id=channel.guild.id,
+        channel_id=channel.id,
+        user_id=owner.id,
+        current_step="awaiting_reason",
+        selected_reason=None,
+        selected_package=None,
+        awaiting_reply=0
+    )
+
+    view = TicketReasonView(channel_id=channel.id, user_id=owner.id)
+
+    await channel.send(
+        f"{owner.mention}\n"
+        "**Thank you for opening a ticket.**\n\n"
+        "I’ll ask a few quick questions before **Liam** or **Jay** reply so we can get this booked or answered more efficiently.\n\n"
+        "**What is the reason for opening the ticket today?**\n\n"
+        "React below using the buttons:\n"
+        "🖥️ **Book an Optimisation**\n"
+        "🌐 **Book a Network Optimisation**\n"
+        "🩺 **Book a Health Check**\n"
+        "❓ **Ask a Question**",
+        view=view
+    )
+
+
+async def handle_optimisation_selection(interaction: discord.Interaction, package_key: str, package_label: str):
+    if not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message("❌ This must be used inside a ticket channel.", ephemeral=True)
+        return
+
+    await update_ticket_intake_state(
+        interaction.channel.id,
+        current_step="awaiting_specs_after_optimisation",
+        selected_reason="optimisation",
+        selected_package=package_key,
+        awaiting_reply=1
+    )
+
+    await interaction.response.send_message(
+        "✅ Selection saved.",
+        ephemeral=True
+    )
+
+    await interaction.channel.send(
+        f"{interaction.user.mention}\n"
+        f"**Selected Service:** {package_label}\n\n"
+        "Please reply below with your **full PC specs** so we can review compatibility before booking.\n\n"
+        "Please include as much of the following as possible:\n"
+        "• CPU\n"
+        "• GPU\n"
+        "• Motherboard\n"
+        "• RAM\n"
+        "• Storage\n"
+        "• PSU\n"
+        "• Cooling setup\n"
+        "• Current Windows version / custom OS status\n"
+        "• Main game(s) you want tuned\n\n"
+        "Once you reply, I’ll post the pre-booking risk acknowledgement for you to accept."
+    )
+
+
+async def handle_network_selection(interaction: discord.Interaction, service_key: str, title: str, body: str):
+    if not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message("❌ This must be used inside a ticket channel.", ephemeral=True)
+        return
+
+    await update_ticket_intake_state(
+        interaction.channel.id,
+        current_step="awaiting_network_completed_button",
+        selected_reason="network_optimisation",
+        selected_package=service_key,
+        awaiting_reply=0
+    )
+
+    await interaction.response.send_message(
+        "✅ Selection saved.",
+        ephemeral=True
+    )
+
+    view = NetworkCompletedView(channel_id=interaction.channel.id, user_id=interaction.user.id)
+    await interaction.channel.send(
+        f"{interaction.user.mention}\n"
+        f"**Selected Service:** {title}\n\n"
+        f"{body}\n\n"
+        "Once you have completed the required steps above, click the button below and I will post the pre-booking risk acknowledgement.",
+        view=view
+    )
+
+
+# =========================
+# Intake Views
+# =========================
+class TicketReasonView(discord.ui.View):
+    def __init__(self, channel_id: int, user_id: int):
+        super().__init__(timeout=None)
+        self.channel_id = channel_id
+        self.user_id = user_id
+
+    @discord.ui.button(label="Book an Optimisation", emoji="🖥️", style=discord.ButtonStyle.primary, custom_id="ticket_reason_optimisation")
+    async def optimisation(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await ensure_ticket_owner_only(interaction, self.user_id):
+            return
+
+        await update_ticket_intake_state(
+            interaction.channel.id,
+            current_step="awaiting_optimisation_package",
+            selected_reason="optimisation",
+            awaiting_reply=0
+        )
+
+        view = OptimisationPackageView(channel_id=interaction.channel.id, user_id=self.user_id)
+        await interaction.response.send_message(
+            "✅ Please choose your optimisation package below.",
+            ephemeral=True
+        )
+        await interaction.channel.send(
+            f"{interaction.user.mention}\n"
+            "**Which package would you like to book?**\n\n"
+            "1️⃣ **Windows Optimisation (No Fresh Install)** — **£65**\n"
+            "2️⃣ **Custom OS w/ Optimisation (Fresh Install Required)** — **£100**\n"
+            "3️⃣ **(AMD) Custom OS + Win Opti + Overclock** — **£150**\n"
+            "4️⃣ **(Intel) Custom OS + Win Opti + Overclock** — **£150**\n"
+            "5️⃣ **Unsure?**\n\n"
+            "Select the most suitable option below."
+            ,
+            view=view
+        )
+
+    @discord.ui.button(label="Book a Network Optimisation", emoji="🌐", style=discord.ButtonStyle.primary, custom_id="ticket_reason_network")
+    async def network(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await ensure_ticket_owner_only(interaction, self.user_id):
+            return
+
+        await update_ticket_intake_state(
+            interaction.channel.id,
+            current_step="awaiting_network_service",
+            selected_reason="network_optimisation",
+            awaiting_reply=0
+        )
+
+        view = NetworkPackageView(channel_id=interaction.channel.id, user_id=self.user_id)
+        await interaction.response.send_message(
+            "✅ Please choose your network service below.",
+            ephemeral=True
+        )
+        await interaction.channel.send(
+            f"{interaction.user.mention}\n"
+            "**Which network service would you like to book?**\n\n"
+            "1️⃣ **Windows Sided Network Opti + Router Configuration Package (OpenNAT)** — **£45**\n"
+            "2️⃣ **Windows Sided Internet Optimisation** — **£35**\n"
+            "3️⃣ **Router Configuration Package (OpenNAT)** — **£25**\n\n"
+            "Select the most suitable option below.",
+            view=view
+        )
+
+    @discord.ui.button(label="Book a Health Check", emoji="🩺", style=discord.ButtonStyle.secondary, custom_id="ticket_reason_healthcheck")
+    async def health_check(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await ensure_ticket_owner_only(interaction, self.user_id):
+            return
+
+        await update_ticket_intake_state(
+            interaction.channel.id,
+            current_step="awaiting_health_check_details",
+            selected_reason="health_check",
+            selected_package="health_check",
+            awaiting_reply=1
+        )
+
+        await interaction.response.send_message(
+            "✅ Please post the requested information in the ticket.",
+            ephemeral=True
+        )
+        await interaction.channel.send(
+            f"{interaction.user.mention}\n"
+            "**Health Check Request**\n\n"
+            "Please reply below with:\n"
+            "• the issue(s) you are experiencing\n"
+            "• your full PC specs\n"
+            "• any troubleshooting already attempted\n"
+            "• any known faults or recent changes\n\n"
+            "Once you reply, I’ll post the pre-booking risk acknowledgement."
+        )
+
+    @discord.ui.button(label="Ask a Question", emoji="❓", style=discord.ButtonStyle.secondary, custom_id="ticket_reason_question")
+    async def ask_question(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await ensure_ticket_owner_only(interaction, self.user_id):
+            return
+
+        await update_ticket_intake_state(
+            interaction.channel.id,
+            current_step="awaiting_question_text",
+            selected_reason="question",
+            selected_package="question",
+            awaiting_reply=1
+        )
+
+        await interaction.response.send_message(
+            "✅ Please post your question in the ticket.",
+            ephemeral=True
+        )
+        await interaction.channel.send(
+            f"{interaction.user.mention}\n"
+            "Please post your question below and **Jay** or **Liam** will be with you as soon as possible."
+        )
+
+
+class OptimisationPackageView(discord.ui.View):
+    def __init__(self, channel_id: int, user_id: int):
+        super().__init__(timeout=None)
+        self.channel_id = channel_id
+        self.user_id = user_id
+
+    @discord.ui.button(label="Windows Optimisation", emoji="1️⃣", style=discord.ButtonStyle.primary, custom_id="opti_pkg_windows")
+    async def windows(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await ensure_ticket_owner_only(interaction, self.user_id):
+            return
+        await handle_optimisation_selection(interaction, "windows_optimisation_65", "Windows Optimisation (No Fresh Install) — £65")
+
+    @discord.ui.button(label="Custom OS + Opti", emoji="2️⃣", style=discord.ButtonStyle.primary, custom_id="opti_pkg_custom_os")
+    async def custom_os(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await ensure_ticket_owner_only(interaction, self.user_id):
+            return
+        await handle_optimisation_selection(interaction, "custom_os_with_optimisation_100", "Custom OS w/ Optimisation (Fresh Install Required) — £100")
+
+    @discord.ui.button(label="AMD OC Package", emoji="3️⃣", style=discord.ButtonStyle.primary, custom_id="opti_pkg_amd")
+    async def amd(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await ensure_ticket_owner_only(interaction, self.user_id):
+            return
+        await handle_optimisation_selection(interaction, "amd_custom_os_win_opti_overclock_150", "(AMD) Custom OS + Win Opti + Overclock — £150")
+
+    @discord.ui.button(label="Intel OC Package", emoji="4️⃣", style=discord.ButtonStyle.primary, custom_id="opti_pkg_intel")
+    async def intel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await ensure_ticket_owner_only(interaction, self.user_id):
+            return
+        await handle_optimisation_selection(interaction, "intel_custom_os_win_opti_overclock_150", "(Intel) Custom OS + Win Opti + Overclock — £150")
+
+    @discord.ui.button(label="Unsure", emoji="5️⃣", style=discord.ButtonStyle.secondary, custom_id="opti_pkg_unsure")
+    async def unsure(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await ensure_ticket_owner_only(interaction, self.user_id):
+            return
+        await handle_optimisation_selection(interaction, "unsure", "Unsure / Needs Guidance")
+
+
+class NetworkPackageView(discord.ui.View):
+    def __init__(self, channel_id: int, user_id: int):
+        super().__init__(timeout=None)
+        self.channel_id = channel_id
+        self.user_id = user_id
+
+    @discord.ui.button(label="Bundle (£45)", emoji="1️⃣", style=discord.ButtonStyle.primary, custom_id="network_pkg_both")
+    async def both(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await ensure_ticket_owner_only(interaction, self.user_id):
+            return
+
+        body = (
+            "**Windows Sided Internet Optimisation**\n"
+            "Use the following link to run a test and post your results in this ticket:\n"
+            "https://www.waveform.com/tools/bufferbloat\n\n"
+            "**Router Configuration Package (OpenNAT)**\n"
+            "To see if you’re eligible for port forwarding, please do the following:\n\n"
+            "1. Log into your router GUI. Typically this is by typing `192.168.1.X` into your browser, "
+            "with the `X` being another number such as `1` or `254`. These vary. If you are unsure, search your "
+            "**ISP + hub manager login IP**.\n\n"
+            "2. Once logged in, locate your router WAN / internet IP address and keep note of it.\n\n"
+            "3. Go to:\n"
+            "https://whatismyipaddress.com/#google_vignette\n\n"
+            "4. You will see both an IPv6 and IPv4 address. You are looking for the **IPv4** address.\n\n"
+            "5. Compare that IPv4 address with the IP address shown in your router GUI.\n"
+            "• If they **do not match**, you are more than likely behind **CGNAT** and may need to contact your ISP to request a **Static IP**.\n"
+            "• If they **do match**, continue to the next step.\n\n"
+            "6. Go back to your router GUI and locate **Port Forwarding**. This is usually under **Security** or **Advanced**, "
+            "but it varies by router.\n\n"
+            "7. Once you have found Port Forwarding, remain in the ticket and we can do a port forward check with a port listener "
+            "to confirm it works before we complete the router configuration.\n\n"
+            "If you are unsure how to do this, we can hop on a call and check this for you, but there will be a **non-refundable £10 fee**. "
+            "If port forwarding is available, that **£10 is deducted** from the service amount. "
+            "If you are on one of our qualifying packages, there is no charge for this check."
+        )
+        await handle_network_selection(
+            interaction,
+            "windows_router_bundle_45",
+            "Windows Sided Network Opti + Router Configuration Package (OpenNAT) — £45",
+            body
+        )
+
+    @discord.ui.button(label="Windows Only (£35)", emoji="2️⃣", style=discord.ButtonStyle.primary, custom_id="network_pkg_windows")
+    async def windows(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await ensure_ticket_owner_only(interaction, self.user_id):
+            return
+
+        body = (
+            "**Windows Sided Internet Optimisation**\n"
+            "Use the following link to run a test and post your results in this ticket:\n"
+            "https://www.waveform.com/tools/bufferbloat"
+        )
+        await handle_network_selection(
+            interaction,
+            "windows_sided_network_35",
+            "Windows Sided Internet Optimisation — £35",
+            body
+        )
+
+    @discord.ui.button(label="Router Only (£25)", emoji="3️⃣", style=discord.ButtonStyle.primary, custom_id="network_pkg_router")
+    async def router(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await ensure_ticket_owner_only(interaction, self.user_id):
+            return
+
+        body = (
+            "**Router Configuration Package (OpenNAT)**\n"
+            "To see if you’re eligible for port forwarding, please do the following:\n\n"
+            "1. Log into your router GUI. Typically this is by typing `192.168.1.X` into your browser, "
+            "with the `X` being another number such as `1` or `254`. These vary. If you are unsure, search your "
+            "**ISP + hub manager login IP**.\n\n"
+            "2. Once logged in, locate your router WAN / internet IP address and keep note of it.\n\n"
+            "3. Go to:\n"
+            "https://whatismyipaddress.com/#google_vignette\n\n"
+            "4. You will see both an IPv6 and IPv4 address. You are looking for the **IPv4** address.\n\n"
+            "5. Compare that IPv4 address with the IP address shown in your router GUI.\n"
+            "• If they **do not match**, you are more than likely behind **CGNAT** and may need to contact your ISP to request a **Static IP**.\n"
+            "• If they **do match**, continue to the next step.\n\n"
+            "6. Go back to your router GUI and locate **Port Forwarding**. This is usually under **Security** or **Advanced**, "
+            "but it varies by router.\n\n"
+            "7. Once you have found Port Forwarding, remain in the ticket and we can do a port forward check with a port listener "
+            "to confirm it works before we complete the router configuration.\n\n"
+            "If you are unsure how to do this, we can hop on a call and check this for you, but there will be a **non-refundable £10 fee**. "
+            "If port forwarding is available, that **£10 is deducted** from the service amount. "
+            "If you are on one of our qualifying packages, there is no charge for this check."
+        )
+        await handle_network_selection(
+            interaction,
+            "router_configuration_25",
+            "Router Configuration Package (OpenNAT) — £25",
+            body
+        )
+
+
+class NetworkCompletedView(discord.ui.View):
+    def __init__(self, channel_id: int, user_id: int):
+        super().__init__(timeout=None)
+        self.channel_id = channel_id
+        self.user_id = user_id
+
+    @discord.ui.button(label="Click Here Once Completed", style=discord.ButtonStyle.success, custom_id="network_completed_continue")
+    async def completed(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await ensure_ticket_owner_only(interaction, self.user_id):
+            return
+
+        if not isinstance(interaction.channel, discord.TextChannel):
+            await interaction.response.send_message("❌ This must be used inside a ticket channel.", ephemeral=True)
+            return
+
+        owner = await get_ticket_owner(interaction.channel)
+        if owner is None:
+            await interaction.response.send_message(
+                "❌ Could not determine the ticket owner for this channel.",
+                ephemeral=True
+            )
+            return
+
+        await update_ticket_intake_state(
+            interaction.channel.id,
+            current_step="network_terms_posted",
+            awaiting_reply=0
+        )
+
+        await interaction.response.send_message(
+            "✅ Thank you. I’m now posting the pre-booking acknowledgement.",
+            ephemeral=True
+        )
+
+        posted = await post_terms_message(interaction.channel, owner)
+        if posted:
+            await interaction.channel.send(
+                f"{owner.mention}\n"
+                "Thank you. Once you have accepted the acknowledgement above, one of the team will review this and take it forward."
+            )
+
+
+# =========================
+# Photo confirmation UI
+# =========================
 class PhotoConfirmView(discord.ui.View):
     def __init__(self, channel_id: int, user_id: int):
         super().__init__(timeout=PHOTO_SESSION_TIMEOUT_SECONDS)
@@ -823,14 +1350,16 @@ class PhotoConfirmView(discord.ui.View):
             child.disabled = True
 
 
-# ---------- Terms acceptance UI ----------
+# =========================
+# Terms acceptance UI
+# =========================
 class TermsAcceptView(discord.ui.View):
     def __init__(self, channel_id: int, user_id: int):
         super().__init__(timeout=None)
         self.channel_id = channel_id
         self.user_id = user_id
 
-    @discord.ui.button(label="✅ I Acknowledge and Agree", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="✅ I Acknowledge and Agree", style=discord.ButtonStyle.success, custom_id="terms_accept_button")
     async def accept_terms(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message(
@@ -940,11 +1469,11 @@ class TermsAcceptView(discord.ui.View):
                     "standard optimisation or troubleshooting process does not resolve access, this may indicate a pre-existing restriction "
                     "affecting the system, hardware, or account which is outside of our control.\n\n"
                     "Where an issue is caused by a pre-existing restriction not created by our service, this will not be grounds for a refund.\n\n"
-                    f"You must also review and accept the full optimisation warranty and terms here:\n<#${FULL_TERMS_CHANNEL_ID}>"
+                    f"You must also review and accept the full optimisation warranty and terms here:\n<#{FULL_TERMS_CHANNEL_ID}>"
                     "\n\n"
                     f"✅ **Accepted on** {accepted_str}\n"
                     f"**Accepted by:** `{accepter_text}`"
-                ).replace("<#$", "<#"),
+                ),
                 view=self
             )
         except discord.HTTPException as e:
@@ -955,15 +1484,29 @@ class TermsAcceptView(discord.ui.View):
             ephemeral=True
         )
 
+        await interaction.channel.send(
+            f"{interaction.user.mention}\n"
+            "Thank you. One of the team will review your ticket and take it forward shortly."
+        )
+
     async def on_timeout(self):
         for child in self.children:
             child.disabled = True
 
 
-# ---------- Events ----------
+# =========================
+# Events
+# =========================
 @bot.event
 async def on_ready():
     await init_db()
+
+    bot.add_view(TermsAcceptView(channel_id=0, user_id=0))
+    bot.add_view(TicketReasonView(channel_id=0, user_id=0))
+    bot.add_view(OptimisationPackageView(channel_id=0, user_id=0))
+    bot.add_view(NetworkPackageView(channel_id=0, user_id=0))
+    bot.add_view(NetworkCompletedView(channel_id=0, user_id=0))
+
     if not timer_loop.is_running():
         timer_loop.start()
     if not post_service_loop.is_running():
@@ -1009,6 +1552,11 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel):
     await mark_processed(channel.guild.id, owner.id)
     print(f"[INFO] Ended timer for {owner} ({owner.id}) because ticket was opened.")
 
+    try:
+        await start_ticket_intake_flow(channel, owner)
+    except discord.HTTPException as e:
+        print(f"[WARN] Failed to start ticket intake flow in {channel.id}: {e}")
+
 
 @bot.event
 async def on_guild_channel_delete(channel: discord.abc.GuildChannel):
@@ -1048,6 +1596,7 @@ async def on_guild_channel_delete(channel: discord.abc.GuildChannel):
     await delete_completed_ticket(channel.id)
     await delete_photo_session(channel.id)
     await delete_terms_acceptance(channel.id)
+    await delete_ticket_intake_state(channel.id)
 
 
 @bot.event
@@ -1063,68 +1612,122 @@ async def on_message(message: discord.Message):
     if not looks_like_ticket_channel(message.channel.name):
         return
 
+    # Photo flow handler
     session = await fetch_photo_session(message.channel.id)
-    if session is None:
+    if session is not None and session["status"] == "awaiting_uploads" and message.author.id == session["user_id"]:
+        image_attachments = [att for att in message.attachments if is_image_attachment(att)]
+        if image_attachments:
+            current_count = 0
+            if session["screenshot1_message_id"]:
+                current_count += 1
+            if session["screenshot2_message_id"]:
+                current_count += 1
+
+            for att in image_attachments:
+                if current_count >= 2:
+                    break
+
+                if current_count == 0:
+                    await update_photo_session_first(
+                        message.channel.id,
+                        message.id,
+                        att.url,
+                        att.filename,
+                        int(message.created_at.timestamp())
+                    )
+                    current_count += 1
+                elif current_count == 1:
+                    await update_photo_session_second(
+                        message.channel.id,
+                        message.id,
+                        att.url,
+                        att.filename,
+                        int(message.created_at.timestamp())
+                    )
+                    current_count += 1
+
+            session = await fetch_photo_session(message.channel.id)
+            if (
+                session
+                and session["screenshot1_message_id"]
+                and session["screenshot2_message_id"]
+                and session["status"] == "awaiting_uploads"
+            ):
+                view = await build_confirm_view(message.channel.id, session["user_id"])
+                confirm_msg = await message.channel.send(
+                    f"<@{session['user_id']}>\n"
+                    "✅ I’ve detected **2 screenshots**.\n\n"
+                    "**Please confirm the following by clicking the green button below:**\n"
+                    "• these screenshots were provided by you\n"
+                    "• they are from your system\n"
+                    "• they accurately reflect the performance shown at the time they were taken\n"
+                    "• you confirm the service has been delivered as described\n"
+                    "• you are satisfied with the performance difference shown\n\n"
+                    "Once confirmed, the screenshots, timestamps, original message links, and your confirmation details will be logged privately.",
+                    view=view
+                )
+                await set_photo_session_confirm_prompt(message.channel.id, confirm_msg.id)
+            return
+
+    # Ticket intake reply handler
+    state = await fetch_ticket_intake_state(message.channel.id)
+    if state is None:
         return
 
-    if session["status"] != "awaiting_uploads":
+    if message.author.id != state["user_id"]:
         return
 
-    if message.author.id != session["user_id"]:
+    if state["awaiting_reply"] != 1:
         return
 
-    image_attachments = [att for att in message.attachments if is_image_attachment(att)]
-    if not image_attachments:
+    owner = await get_ticket_owner(message.channel)
+    if owner is None:
         return
 
-    current_count = 0
-    if session["screenshot1_message_id"]:
-        current_count += 1
-    if session["screenshot2_message_id"]:
-        current_count += 1
-
-    for att in image_attachments:
-        if current_count >= 2:
-            break
-
-        if current_count == 0:
-            await update_photo_session_first(
-                message.channel.id,
-                message.id,
-                att.url,
-                att.filename,
-                int(message.created_at.timestamp())
-            )
-            current_count += 1
-        elif current_count == 1:
-            await update_photo_session_second(
-                message.channel.id,
-                message.id,
-                att.url,
-                att.filename,
-                int(message.created_at.timestamp())
-            )
-            current_count += 1
-
-    session = await fetch_photo_session(message.channel.id)
-    if session and session["screenshot1_message_id"] and session["screenshot2_message_id"] and session["status"] == "awaiting_uploads":
-        view = await build_confirm_view(message.channel.id, session["user_id"])
-        confirm_msg = await message.channel.send(
-            f"<@{session['user_id']}>\n"
-            "✅ I’ve detected **2 screenshots**.\n\n"
-            "**Please confirm the following by clicking the green button below:**\n"
-            "• these screenshots were provided by you\n"
-            "• they are from your system\n"
-            "• they accurately reflect the performance shown at the time they were taken\n"
-            "• you confirm the service has been delivered as described\n"
-            "• you are satisfied with the performance difference shown\n\n"
-            "Once confirmed, the screenshots, timestamps, original message links, and your confirmation details will be logged privately.",
-            view=view
+    if state["current_step"] == "awaiting_specs_after_optimisation":
+        await update_ticket_intake_state(
+            message.channel.id,
+            current_step="optimisation_terms_posted",
+            awaiting_reply=0
         )
-        await set_photo_session_confirm_prompt(message.channel.id, confirm_msg.id)
+        await message.channel.send(
+            f"{owner.mention}\n"
+            "Thank you for providing your specs.\n\n"
+            "I’m now posting the pre-booking risk acknowledgement. Once accepted, one of the team will review this and take it forward."
+        )
+        await post_terms_message(message.channel, owner)
+        return
+
+    if state["current_step"] == "awaiting_health_check_details":
+        await update_ticket_intake_state(
+            message.channel.id,
+            current_step="health_check_terms_posted",
+            awaiting_reply=0
+        )
+        await message.channel.send(
+            f"{owner.mention}\n"
+            "Thank you for the information.\n\n"
+            "I’m now posting the pre-booking risk acknowledgement. Once accepted, one of the team will review this and take it forward."
+        )
+        await post_terms_message(message.channel, owner)
+        return
+
+    if state["current_step"] == "awaiting_question_text":
+        await update_ticket_intake_state(
+            message.channel.id,
+            current_step="question_submitted",
+            awaiting_reply=0
+        )
+        await message.channel.send(
+            f"{owner.mention}\n"
+            "Thank you. Your question has been noted and **Jay** or **Liam** will reply as soon as possible."
+        )
+        return
 
 
-# ---------- Slash Commands ----------
+# =========================
+# Slash Commands
+# =========================
 @bot.tree.command(name="booked", description="Mark a user's optimisation as booked")
 @app_commands.checks.has_permissions(manage_channels=True)
 async def booked(interaction: discord.Interaction):
@@ -1198,7 +1801,7 @@ async def booked(interaction: discord.Interaction):
         "Before your optimisation takes place, you must:\n"
         "• Run `/terms` in this ticket and accept the pre-booking acknowledgement\n"
         f"• Read and review the full terms here: <#{FULL_TERMS_CHANNEL_ID}>\n"
-        "• Read and follow all required prep steps in <#1454148951644180573>\n\n"
+        f"• Read and follow all required prep steps in <#{OPTI_STEPS_CHANNEL_ID}>\n\n"
         "⚠️ You must accept the terms and complete the required steps before your optimisation takes place."
     )
 
@@ -1240,31 +1843,8 @@ async def terms(interaction: discord.Interaction):
         )
         return
 
-    view = await build_terms_view(interaction.channel.id, owner.id)
-
     await interaction.response.defer(ephemeral=False)
-
-    msg = await interaction.channel.send(
-        f"{owner.mention}\n"
-        "⚠️ **Pre-Booking Risk Acknowledgement**\n\n"
-        "Before your optimisation takes place, please read the below carefully.\n\n"
-        "By clicking the button below, you confirm that to the best of your knowledge, neither this system nor any of its "
-        "components have previously been used in connection with cheating, spoofing, ban evasion, or similar activity.\n\n"
-        "You also acknowledge that if you are attempting to access features such as Call of Duty: Ranked Play, and the "
-        "standard optimisation or troubleshooting process does not resolve access, this may indicate a pre-existing restriction "
-        "affecting the system, hardware, or account which is outside of our control.\n\n"
-        "Where an issue is caused by a pre-existing restriction not created by our service, this will not be grounds for a refund.\n\n"
-        f"You must also review and accept the full optimisation warranty and terms here:\n<#{FULL_TERMS_CHANNEL_ID}>\n\n"
-        "Click the button below only if you understand and agree.",
-        view=view
-    )
-
-    await upsert_terms_acceptance(
-        interaction.guild.id,
-        interaction.channel.id,
-        owner.id,
-        msg.id
-    )
+    await post_terms_message(interaction.channel, owner)
 
     await interaction.followup.send(
         "✅ Terms acknowledgement posted.",
@@ -1454,6 +2034,9 @@ async def photos(interaction: discord.Interaction):
     )
 
 
+# =========================
+# Error handlers
+# =========================
 @booked.error
 async def booked_error(interaction: discord.Interaction, error):
     if isinstance(error, app_commands.errors.MissingPermissions):
@@ -1534,7 +2117,9 @@ async def photos_error(interaction: discord.Interaction, error):
         )
 
 
-# ---------- Timer loops ----------
+# =========================
+# Timer loops
+# =========================
 @tasks.loop(minutes=CHECK_EVERY_MINUTES)
 async def timer_loop():
     now_ts = int(time.time())
