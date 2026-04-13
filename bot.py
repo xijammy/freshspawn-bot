@@ -83,11 +83,11 @@ async def init_db():
             )
         """)
         await db.execute("""
-            CREATE TABLE IF NOT EXISTS d_tickets (
+            CREATE TABLE IF NOT EXISTS completed_tickets (
                 channel_id   INTEGER NOT NULL PRIMARY KEY,
                 guild_id     INTEGER NOT NULL,
                 user_id      INTEGER NOT NULL,
-                d_at INTEGER NOT NULL,
+                completed_at INTEGER NOT NULL,
                 reminded     INTEGER NOT NULL DEFAULT 0,
                 finalised    INTEGER NOT NULL DEFAULT 0
             )
@@ -227,54 +227,54 @@ async def delete_ticket_owner(channel_id: int):
         await db.commit()
 
 
-async def save_d_ticket(guild_id: int, channel_id: int, user_id: int):
+async def save_completed_ticket(guild_id: int, channel_id: int, user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
-            INSERT INTO d_tickets (channel_id, guild_id, user_id, d_at, reminded, finalised)
+            INSERT INTO completed_tickets (channel_id, guild_id, user_id, completed_at, reminded, finalised)
             VALUES (?, ?, ?, ?, 0, 0)
             ON CONFLICT(channel_id) DO UPDATE SET
                 guild_id=excluded.guild_id,
                 user_id=excluded.user_id,
-                d_at=excluded.d_at,
+                completed_at=excluded.completed_at,
                 reminded=0,
                 finalised=0
         """, (channel_id, guild_id, user_id, int(time.time())))
         await db.commit()
 
 
-async def fetch_d_tickets():
+async def fetch_completed_tickets():
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("""
-            SELECT channel_id, guild_id, user_id, d_at, reminded, finalised
-            FROM d_tickets
+            SELECT channel_id, guild_id, user_id, completed_at, reminded, finalised
+            FROM completed_tickets
         """)
         return await cur.fetchall()
 
 
-async def mark_d_ticket_reminded(channel_id: int):
+async def mark_completed_ticket_reminded(channel_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
-            UPDATE d_tickets
+            UPDATE completed_tickets
             SET reminded=1
             WHERE channel_id=?
         """, (channel_id,))
         await db.commit()
 
 
-async def mark_d_ticket_finalised(channel_id: int):
+async def mark_completed_ticket_finalised(channel_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
-            UPDATE d_tickets
+            UPDATE completed_tickets
             SET finalised=1
             WHERE channel_id=?
         """, (channel_id,))
         await db.commit()
 
 
-async def delete_d_ticket(channel_id: int):
+async def delete_completed_ticket(channel_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
-            DELETE FROM d_tickets
+            DELETE FROM completed_tickets
             WHERE channel_id=?
         """, (channel_id,))
         await db.commit()
@@ -823,9 +823,7 @@ async def handle_optimisation_selection(interaction: discord.Interaction, packag
         "• Cooler\n"
         "• PSU\n"
         "• If you're unsure about any of these then please make it known\n"
-      
-        "• Has your PC been previously optimised or have you made any registry edits or used an scripts to your knowledge? If so a fresh install of windows will have to be carried out. If you choose not to, then the warranty will not apply to yourself as we don't know the prior condition of the OS. If you choose not to have a fresh install and during the optimisation something corrupts then you will have to pay a fee of £50 for a fresh install or the service will be terminated and no refund given as this is a choice made by yourself prior to booking.\n"
-        
+        "• Has your PC been previously optimised or have you made any registry edits or used any scripts to your knowledge? If so a fresh install of Windows will have to be carried out. If you choose not to, then the warranty will not apply to yourself as we don't know the prior condition of the OS. If you choose not to have a fresh install and during the optimisation something corrupts then you will have to pay a fee of £50 for a fresh install or the service will be terminated and no refund given as this is a choice made by yourself prior to booking.\n\n"
         "Once you reply, I’ll post the pre-booking risk acknowledgement for you to accept."
     )
 
@@ -848,7 +846,7 @@ async def handle_network_selection(interaction: discord.Interaction, service_key
         ephemeral=True
     )
 
-    view = NetworkdView(channel_id=interaction.channel.id, user_id=interaction.user.id)
+    view = NetworkCompletedView(channel_id=interaction.channel.id, user_id=interaction.user.id)
     await interaction.channel.send(
         f"{interaction.user.mention}\n"
         f"**Selected Service:** {title}\n\n"
@@ -892,8 +890,7 @@ class TicketReasonView(discord.ui.View):
             "3️⃣ **(AMD) Custom OS + Win Opti + Overclock** — **£150**\n"
             "4️⃣ **(Intel) Custom OS + Win Opti + Overclock** — **£150**\n"
             "5️⃣ **Unsure?**\n\n"
-            "Select the most suitable option below."
-            ,
+            "Select the most suitable option below.",
             view=view
         )
 
@@ -1117,7 +1114,7 @@ class NetworkCompletedView(discord.ui.View):
             return
 
         if not isinstance(interaction.channel, discord.TextChannel):
-            await interaction.response.send_message("❌ This must be used inside a ticket channel.", ephemeral=True)
+            await interaction.response.send_message("❌ This must be used inside the ticket channel.", ephemeral=True)
             return
 
         owner = await get_ticket_owner(interaction.channel)
@@ -1614,7 +1611,6 @@ async def on_message(message: discord.Message):
     if not looks_like_ticket_channel(message.channel.name):
         return
 
-    # Photo flow handler
     session = await fetch_photo_session(message.channel.id)
     if session is not None and session["status"] == "awaiting_uploads" and message.author.id == session["user_id"]:
         image_attachments = [att for att in message.attachments if is_image_attachment(att)]
@@ -1671,7 +1667,6 @@ async def on_message(message: discord.Message):
                 await set_photo_session_confirm_prompt(message.channel.id, confirm_msg.id)
             return
 
-    # Ticket intake reply handler
     state = await fetch_ticket_intake_state(message.channel.id)
     if state is None:
         return
@@ -1961,7 +1956,7 @@ async def complete(interaction: discord.Interaction):
         f"During these 7 days, if you are happy with the service, please confirm this in <#{POST_SERVICE_CHANNEL_ID}>.\n\n"
         "If you experience any issues within scope, you must make us aware **in this open ticket** before the review period ends.\n\n"
         "You will receive a reminder after 7 days if you have not already completed the post-service confirmation.\n\n"
-        "If no issues are raised within the review period, and you do not complete the confirmation within the additional 12-hour reminder window, the service will be considered **accepted and completed**, the relevant role will be assigned, and the ticket may then be closed.\n\n"
+        "If no issues were raised within the review period, and you do not complete the confirmation within the additional 12-hour reminder window, the service will be considered **accepted and completed**, the relevant role will be assigned, and the ticket may then be closed.\n\n"
         "⚠️ Do not private message staff regarding support. Use this ticket only."
     )
 
