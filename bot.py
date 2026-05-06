@@ -83,11 +83,11 @@ async def init_db():
             )
         """)
         await db.execute("""
-            CREATE TABLE IF NOT EXISTS completed_tickets (
+            CREATE TABLE IF NOT EXISTS d_tickets (
                 channel_id   INTEGER NOT NULL PRIMARY KEY,
                 guild_id     INTEGER NOT NULL,
                 user_id      INTEGER NOT NULL,
-                completed_at INTEGER NOT NULL,
+                d_at INTEGER NOT NULL,
                 reminded     INTEGER NOT NULL DEFAULT 0,
                 finalised    INTEGER NOT NULL DEFAULT 0
             )
@@ -1956,6 +1956,7 @@ async def complete(interaction: discord.Interaction):
         f"During these 7 days, if you are happy with the service, please confirm this in <#{POST_SERVICE_CHANNEL_ID}>.\n\n"
         "If you experience any issues within scope, you must make us aware **in this open ticket** before the review period ends.\n\n"
         "You will receive a reminder after 7 days if you have not already completed the post-service confirmation.\n\n"
+        "UNDER NO CIRCUMSTANCES INSTALL NVIDIA APP, ADRENALINE SOFTWARE, ANY AUTOMATIC DRIVER UPDATE TOOLS (DRIVER BOOSTER etc), ANTI-VIRUS SOFTWARE AND ANY REGISTRY SOFTWARE E.G C-CLEANER, IF YOU DECICIDE TO INSTALL ANY OF THESE PROGRAMMES, YOUR WARRANTY WILL BE VOID!\n\n"
         "If no issues were raised within the review period, and you do not complete the confirmation within the additional 12-hour reminder window, the service will be considered **accepted and completed**, the relevant role will be assigned, and the ticket may then be closed.\n\n"
         "⚠️ Do not private message staff regarding support. Use this ticket only."
     )
