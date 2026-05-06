@@ -227,7 +227,24 @@ async def delete_ticket_owner(channel_id: int):
         await db.commit()
 
 
+async def ensure_completed_tickets_table():
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS completed_tickets (
+                channel_id   INTEGER NOT NULL PRIMARY KEY,
+                guild_id     INTEGER NOT NULL,
+                user_id      INTEGER NOT NULL,
+                completed_at INTEGER NOT NULL,
+                reminded     INTEGER NOT NULL DEFAULT 0,
+                finalised    INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        await db.commit()
+
+
 async def save_completed_ticket(guild_id: int, channel_id: int, user_id: int):
+    await ensure_completed_tickets_table()
+
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             INSERT INTO completed_tickets (channel_id, guild_id, user_id, completed_at, reminded, finalised)
@@ -243,6 +260,8 @@ async def save_completed_ticket(guild_id: int, channel_id: int, user_id: int):
 
 
 async def fetch_completed_tickets():
+    await ensure_completed_tickets_table()
+
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("""
             SELECT channel_id, guild_id, user_id, completed_at, reminded, finalised
@@ -252,6 +271,8 @@ async def fetch_completed_tickets():
 
 
 async def mark_completed_ticket_reminded(channel_id: int):
+    await ensure_completed_tickets_table()
+
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             UPDATE completed_tickets
@@ -262,6 +283,8 @@ async def mark_completed_ticket_reminded(channel_id: int):
 
 
 async def mark_completed_ticket_finalised(channel_id: int):
+    await ensure_completed_tickets_table()
+
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             UPDATE completed_tickets
@@ -272,14 +295,14 @@ async def mark_completed_ticket_finalised(channel_id: int):
 
 
 async def delete_completed_ticket(channel_id: int):
+    await ensure_completed_tickets_table()
+
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             DELETE FROM completed_tickets
             WHERE channel_id=?
         """, (channel_id,))
         await db.commit()
-
-
 # ---------- Terms DB ----------
 async def upsert_terms_acceptance(guild_id: int, channel_id: int, user_id: int, terms_message_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -823,7 +846,7 @@ async def handle_optimisation_selection(interaction: discord.Interaction, packag
         "• Cooler\n"
         "• PSU\n"
         "• If you're unsure about any of these then please make it known\n"
-        "• Has your PC been previously optimised or have you made any registry edits or used any scripts to your knowledge? If so a fresh install of Windows will have to be carried out. If you choose not to, then the warranty will not apply to yourself as we don't know the prior condition of the OS. If you choose not to have a fresh install and during the optimisation something corrupts then you will have to pay a fee of £50 for a fresh install or the service will be terminated and no refund given as this is a choice made by yourself prior to booking.\n\n"
+        "• Has your PC been previously optimised or have you made any registry edits or used any scripts to your knowledge? If so a fresh  of Windows will have to be carried out. If you choose not to, then the warranty will not apply to yourself as we don't know the prior condition of the OS. If you choose not to have a fresh  and during the optimisation something corrupts then you will have to pay a fee of £50 for a fresh  or the service will be terminated and no refund given as this is a choice made by yourself prior to booking.\n\n"
         "Once you reply, I’ll post the pre-booking risk acknowledgement for you to accept."
     )
 
@@ -885,8 +908,8 @@ class TicketReasonView(discord.ui.View):
         await interaction.channel.send(
             f"{interaction.user.mention}\n"
             "**Which package would you like to book?**\n\n"
-            "1️⃣ **Windows Optimisation (No Fresh Install)** — **£65**\n"
-            "2️⃣ **Custom OS w/ Optimisation (Fresh Install Required)** — **£100**\n"
+            "1️⃣ **Windows Optimisation (No Fresh )** — **£65**\n"
+            "2️⃣ **Custom OS w/ Optimisation (Fresh  Required)** — **£100**\n"
             "3️⃣ **(AMD) Custom OS + Win Opti + Overclock** — **£150**\n"
             "4️⃣ **(Intel) Custom OS + Win Opti + Overclock** — **£150**\n"
             "5️⃣ **Unsure?**\n\n"
@@ -982,13 +1005,13 @@ class OptimisationPackageView(discord.ui.View):
     async def windows(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await ensure_ticket_owner_only(interaction, self.user_id):
             return
-        await handle_optimisation_selection(interaction, "windows_optimisation_65", "Windows Optimisation (No Fresh Install) — £65")
+        await handle_optimisation_selection(interaction, "windows_optimisation_65", "Windows Optimisation (No Fresh ) — £65")
 
     @discord.ui.button(label="Custom OS + Opti", emoji="2️⃣", style=discord.ButtonStyle.primary, custom_id="opti_pkg_custom_os")
     async def custom_os(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await ensure_ticket_owner_only(interaction, self.user_id):
             return
-        await handle_optimisation_selection(interaction, "custom_os_with_optimisation_100", "Custom OS w/ Optimisation (Fresh Install Required) — £100")
+        await handle_optimisation_selection(interaction, "custom_os_with_optimisation_100", "Custom OS w/ Optimisation (Fresh  Required) — £100")
 
     @discord.ui.button(label="AMD OC Package", emoji="3️⃣", style=discord.ButtonStyle.primary, custom_id="opti_pkg_amd")
     async def amd(self, interaction: discord.Interaction, button: discord.ui.Button):
