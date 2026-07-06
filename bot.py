@@ -908,10 +908,10 @@ class TicketReasonView(discord.ui.View):
         await interaction.channel.send(
             f"{interaction.user.mention}\n"
             "**Which package would you like to book?**\n\n"
-            "1️⃣ **Windows Optimisation (No Fresh )** — **£65**\n"
-            "2️⃣ **Custom OS w/ Optimisation (Fresh  Required)** — **£100**\n"
-            "3️⃣ **(AMD) Custom OS + Win Opti + Overclock** — **£150**\n"
-            "4️⃣ **(Intel) Custom OS + Win Opti + Overclock** — **£150**\n"
+            "1️⃣ **Windows Optimisation + Basic Bios (No Fresh )** — **£100 |  Sub Price - £85**\n"
+            "2️⃣ **Fresh Install + Windows Opt + Basic Bios (Fresh  Required)** — **£135 | Sub Price - £100**\n"
+            "3️⃣ **(AMD) Fresh Install + Win Opti + Overclock** — **£165 | Sub Price - £140**\n"
+            "4️⃣ **(Intel) Fresh Install + Win Opti + Overclock** — **£185 | Sub Price - £150**\n"
             "5️⃣ **Unsure?**\n\n"
             "Select the most suitable option below.",
             view=view
@@ -937,7 +937,7 @@ class TicketReasonView(discord.ui.View):
         await interaction.channel.send(
             f"{interaction.user.mention}\n"
             "**Which network service would you like to book?**\n\n"
-            "1️⃣ **Windows Sided Network Opti + Router Configuration Package (OpenNAT)** — **£45**\n"
+            "1️⃣ **Windows Sided Network Opti + Router Configuration Package (OpenNAT)** — **£50 | Sub Price - Free**\n"
             "2️⃣ **Windows Sided Internet Optimisation** — **£35**\n"
             "3️⃣ **Router Configuration Package (OpenNAT)** — **£25**\n\n"
             "Select the most suitable option below.",
@@ -1005,25 +1005,25 @@ class OptimisationPackageView(discord.ui.View):
     async def windows(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await ensure_ticket_owner_only(interaction, self.user_id):
             return
-        await handle_optimisation_selection(interaction, "windows_optimisation_65", "Windows Optimisation (No Fresh ) — £65")
+        await handle_optimisation_selection(interaction, "windows_optimisation_65", "Windows Optimisation + Basic Bios - £100 |  Sub Price - £85")
 
     @discord.ui.button(label="Custom OS + Opti", emoji="2️⃣", style=discord.ButtonStyle.primary, custom_id="opti_pkg_custom_os")
     async def custom_os(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await ensure_ticket_owner_only(interaction, self.user_id):
             return
-        await handle_optimisation_selection(interaction, "custom_os_with_optimisation_100", "Custom OS w/ Optimisation (Fresh  Required) — £100")
+        await handle_optimisation_selection(interaction, "custom_os_with_optimisation_100", "Fresh Install + Windows Opt + Basic Bios - £135 | Sub Price - £100")
 
     @discord.ui.button(label="AMD OC Package", emoji="3️⃣", style=discord.ButtonStyle.primary, custom_id="opti_pkg_amd")
     async def amd(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await ensure_ticket_owner_only(interaction, self.user_id):
             return
-        await handle_optimisation_selection(interaction, "amd_custom_os_win_opti_overclock_150", "(AMD) Custom OS + Win Opti + Overclock — £150")
+        await handle_optimisation_selection(interaction, "amd_custom_os_win_opti_overclock_150", "(AMD) Custom OS + Win Opti + Overclock — £165 | Sub Price - £140")
 
     @discord.ui.button(label="Intel OC Package", emoji="4️⃣", style=discord.ButtonStyle.primary, custom_id="opti_pkg_intel")
     async def intel(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await ensure_ticket_owner_only(interaction, self.user_id):
             return
-        await handle_optimisation_selection(interaction, "intel_custom_os_win_opti_overclock_150", "(Intel) Custom OS + Win Opti + Overclock — £150")
+        await handle_optimisation_selection(interaction, "intel_custom_os_win_opti_overclock_150", "(Intel) Custom OS + Win Opti + Overclock —  £185 | Sub Price - £150")
 
     @discord.ui.button(label="Unsure", emoji="5️⃣", style=discord.ButtonStyle.secondary, custom_id="opti_pkg_unsure")
     async def unsure(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1038,7 +1038,7 @@ class NetworkPackageView(discord.ui.View):
         self.channel_id = channel_id
         self.user_id = user_id
 
-    @discord.ui.button(label="Bundle (£45)", emoji="1️⃣", style=discord.ButtonStyle.primary, custom_id="network_pkg_both")
+    @discord.ui.button(label="Bundle (£50)", emoji="1️⃣", style=discord.ButtonStyle.primary, custom_id="network_pkg_both")
     async def both(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await ensure_ticket_owner_only(interaction, self.user_id):
             return
@@ -1070,7 +1070,7 @@ class NetworkPackageView(discord.ui.View):
         await handle_network_selection(
             interaction,
             "windows_router_bundle_45",
-            "Windows Sided Network Opti + Router Configuration Package (OpenNAT) — £45",
+            "Windows Sided Network Opti + Router Configuration Package (OpenNAT) — £50 | Sub Price - Free",
             body
         )
 
