@@ -1085,9 +1085,9 @@ class TicketReasonView(discord.ui.View):
         await update_ticket_intake_state(interaction.channel.id, current_step="awaiting_health_check_details", selected_reason="health_check", selected_package="health_check", awaiting_reply=1)
         await interaction.response.send_message("✅ Please post the requested information in the ticket.", ephemeral=True)
         await interaction.channel.send(
-            f"{interaction.user.mention}\n**Health Check Request**\n\n"
+            f"{interaction.user.mention}\n**Health Check Request - £20**\n\n"
             "Please reply below with:\n• the issue(s) you are experiencing\n• your full PC specs\n• any troubleshooting already attempted\n• any known faults or recent changes\n\n"
-            "Once you reply, I’ll post the pre-booking risk acknowledgement."
+            "Once you reply, I’ll post the pre-booking risk acknowledgement, once you have purchased a health check and it has been completed, £15 will be knocked off any subsequent optimisation bundle you purchase."
         )
 
     @discord.ui.button(label="Ask a Question", emoji="❓", style=discord.ButtonStyle.secondary, custom_id="ticket_reason_question")
