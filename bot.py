@@ -1022,7 +1022,6 @@ class TicketReasonView(discord.ui.View):
         prices = (
             "1️⃣ **Windows Network Optimisation** — **FREE**\n"
             "2️⃣ **Router / Open NAT** — **FREE**\n"
-            "3️⃣ **Network Bundle** — **£50**"
             if is_sub else
             "1️⃣ **Windows Network Optimisation** — **£35**\n"
             "2️⃣ **Router / Open NAT** — **£15**\n"
