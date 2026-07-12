@@ -25,6 +25,8 @@ COMPLETED_CATEGORY_ID = int(os.environ["COMPLETED_CATEGORY_ID"])
 BOOKED_OPTI_ROLE_ID = 1454148372377374730
 FRESH_SPAWN_ROLE_ID = 1454403124155519108
 
+SUBSCRIBER_ROLE_IDS = {1440789976676696094, 1440789184666402987}
+
 TICKET_NAME_RE = re.compile(r"ticket-\d+", re.IGNORECASE)
 
 ENQUIRED_ROLE_ID = 1473603025770647615
@@ -808,18 +810,57 @@ async def start_ticket_intake_flow(channel: discord.TextChannel, owner: discord.
         "I’ll ask a few quick questions before **Liam** or **Jay** reply so we can get this booked or answered more efficiently.\n\n"
         "**What is the reason for opening the ticket today?**\n\n"
         "React below using the buttons:\n"
-        "🖥️ **Book an Optimisation**\n"
+        "🖥️ **Book a PC Optimisation**\n"
         "🌐 **Book a Network Optimisation**\n"
+        "➕ **Additional Add-ons**\n"
+        "🛡️ **Extended Warranty**\n"
         "🩺 **Book a Health Check**\n"
         "❓ **Ask a Question**",
         view=view
     )
 
 
-async def handle_optimisation_selection(interaction: discord.Interaction, package_key: str, package_label: str):
+def member_has_subscriber_pricing(member: discord.Member) -> bool:
+    return any(role.id in SUBSCRIBER_ROLE_IDS for role in member.roles)
+
+
+def pricing_tier_name(member: discord.Member) -> str:
+    return "Subscriber Pricing" if member_has_subscriber_pricing(member) else "Standard Pricing"
+
+
+def price_for(member: discord.Member, standard: str, subscriber: Optional[str] = None) -> str:
+    if member_has_subscriber_pricing(member) and subscriber is not None:
+        return subscriber
+    return standard
+
+
+def booking_policy_text() -> str:
+    return (
+        "\n\n⚠️ **Important**\n"
+        "• Subscriber prices require an active subscription for at least **3 months**.\n"
+        "• Every package includes a **7-day standard warranty**, except Network Optimisation services.\n"
+        "• **No refunds.**"
+    )
+
+
+async def handle_optimisation_selection(
+    interaction: discord.Interaction,
+    package_key: str,
+    package_name: str,
+    standard_price: str,
+    subscriber_price: str,
+):
     if not isinstance(interaction.channel, discord.TextChannel):
         await interaction.response.send_message("❌ This must be used inside a ticket channel.", ephemeral=True)
         return
+
+    member = interaction.user
+    if not isinstance(member, discord.Member):
+        await interaction.response.send_message("❌ Could not verify your server roles.", ephemeral=True)
+        return
+
+    selected_price = price_for(member, standard_price, subscriber_price)
+    selected_label = f"{package_name} — {selected_price} ({pricing_tier_name(member)})"
 
     await update_ticket_intake_state(
         interaction.channel.id,
@@ -829,14 +870,10 @@ async def handle_optimisation_selection(interaction: discord.Interaction, packag
         awaiting_reply=1
     )
 
-    await interaction.response.send_message(
-        "✅ Selection saved.",
-        ephemeral=True
-    )
-
+    await interaction.response.send_message("✅ Selection saved.", ephemeral=True)
     await interaction.channel.send(
         f"{interaction.user.mention}\n"
-        f"**Selected Service:** {package_label}\n\n"
+        f"**Selected Service:** {selected_label}\n\n"
         "Please reply below with your **full PC specs** so we can review compatibility before booking.\n\n"
         "Please include as much of the following as possible:\n"
         "• CPU\n"
@@ -845,16 +882,73 @@ async def handle_optimisation_selection(interaction: discord.Interaction, packag
         "• RAM\n"
         "• Cooler\n"
         "• PSU\n"
-        "• If you're unsure about any of these then please make it known\n"
-        "• Has your PC been previously optimised or have you made any registry edits or used any scripts to your knowledge? If so a fresh  of Windows will have to be carried out. If you choose not to, then the warranty will not apply to yourself as we don't know the prior condition of the OS. If you choose not to have a fresh  and during the optimisation something corrupts then you will have to pay a fee of £50 for a fresh  or the service will be terminated and no refund given as this is a choice made by yourself prior to booking.\n\n"
+        "• If you're unsure about any of these, please say so.\n"
+        "• Has your PC previously been optimised, had registry edits made, or had scripts used on it? If so, a fresh install of Windows will be required. If you decline a fresh install, the warranty will not apply because we cannot verify the prior condition of the operating system. If corruption occurs during the optimisation after you decline a fresh install, you will need to pay £50 for a fresh install or the service will be terminated without a refund.\n\n"
         "Once you reply, I’ll post the pre-booking risk acknowledgement for you to accept."
+        + booking_policy_text()
     )
 
 
-async def handle_network_selection(interaction: discord.Interaction, service_key: str, title: str, body: str):
+async def handle_addon_selection(
+    interaction: discord.Interaction,
+    package_key: str,
+    package_name: str,
+    standard_price: str,
+    subscriber_price: str,
+):
+    await handle_optimisation_selection(
+        interaction,
+        package_key,
+        package_name,
+        standard_price,
+        subscriber_price,
+    )
+
+
+async def handle_warranty_selection(
+    interaction: discord.Interaction,
+    package_key: str,
+    package_name: str,
+    price: str,
+):
     if not isinstance(interaction.channel, discord.TextChannel):
         await interaction.response.send_message("❌ This must be used inside a ticket channel.", ephemeral=True)
         return
+
+    await update_ticket_intake_state(
+        interaction.channel.id,
+        current_step="warranty_selected",
+        selected_reason="extended_warranty",
+        selected_package=package_key,
+        awaiting_reply=0,
+    )
+    await interaction.response.send_message("✅ Selection saved.", ephemeral=True)
+    await interaction.channel.send(
+        f"{interaction.user.mention}\n"
+        f"**Selected Extended Warranty:** {package_name} — {price}\n\n"
+        "One of the team will confirm eligibility and arrange the one-time payment.\n\n"
+        "Extended warranty does not alter the no-refunds policy."
+    )
+
+
+async def handle_network_selection(
+    interaction: discord.Interaction,
+    service_key: str,
+    title: str,
+    body: str,
+    standard_price: str,
+    subscriber_price: Optional[str] = None,
+):
+    if not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message("❌ This must be used inside a ticket channel.", ephemeral=True)
+        return
+
+    member = interaction.user
+    if not isinstance(member, discord.Member):
+        await interaction.response.send_message("❌ Could not verify your server roles.", ephemeral=True)
+        return
+
+    selected_price = price_for(member, standard_price, subscriber_price)
 
     await update_ticket_intake_state(
         interaction.channel.id,
@@ -864,17 +958,15 @@ async def handle_network_selection(interaction: discord.Interaction, service_key
         awaiting_reply=0
     )
 
-    await interaction.response.send_message(
-        "✅ Selection saved.",
-        ephemeral=True
-    )
+    await interaction.response.send_message("✅ Selection saved.", ephemeral=True)
 
     view = NetworkCompletedView(channel_id=interaction.channel.id, user_id=interaction.user.id)
     await interaction.channel.send(
         f"{interaction.user.mention}\n"
-        f"**Selected Service:** {title}\n\n"
+        f"**Selected Service:** {title} — {selected_price} ({pricing_tier_name(member)})\n\n"
         f"{body}\n\n"
-        "Once you have completed the required steps above, click the button below and I will post the pre-booking risk acknowledgement.",
+        "Once you have completed the required steps above, click the button below and I will post the pre-booking risk acknowledgement."
+        + booking_policy_text(),
         view=view
     )
 
@@ -888,33 +980,36 @@ class TicketReasonView(discord.ui.View):
         self.channel_id = channel_id
         self.user_id = user_id
 
-    @discord.ui.button(label="Book an Optimisation", emoji="🖥️", style=discord.ButtonStyle.primary, custom_id="ticket_reason_optimisation")
+    @discord.ui.button(label="Book a PC Optimisation", emoji="🖥️", style=discord.ButtonStyle.primary, custom_id="ticket_reason_optimisation")
     async def optimisation(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await ensure_ticket_owner_only(interaction, self.user_id):
             return
 
-        await update_ticket_intake_state(
-            interaction.channel.id,
-            current_step="awaiting_optimisation_package",
-            selected_reason="optimisation",
-            awaiting_reply=0
+        member = interaction.user
+        is_sub = isinstance(member, discord.Member) and member_has_subscriber_pricing(member)
+        heading = "Subscriber PC Optimisation Prices" if is_sub else "Standard PC Optimisation Prices"
+        prices = (
+            "1️⃣ **Windows Opt (No Fresh Install)** — **£35**\n"
+            "2️⃣ **Windows Opt (Fresh Install)** — **£45**\n"
+            "3️⃣ **Windows & BIOS Update + Basic BIOS Config** — **£70**\n"
+            "4️⃣ **AMD Full Tune** — **£115**\n"
+            "5️⃣ **Intel Full Tune** — **£145**\n"
+            if is_sub else
+            "1️⃣ **Windows Opt (No Fresh Install)** — **£50**\n"
+            "2️⃣ **Windows Opt (Fresh Install)** — **£65**\n"
+            "3️⃣ **Windows & BIOS Update + Basic BIOS Config** — **£85**\n"
+            "4️⃣ **AMD Full Tune** — **£135**\n"
+            "5️⃣ **Intel Full Tune** — **£165**\n"
         )
 
-        view = OptimisationPackageView(channel_id=interaction.channel.id, user_id=self.user_id)
-        await interaction.response.send_message(
-            "✅ Please choose your optimisation package below.",
-            ephemeral=True
-        )
+        await update_ticket_intake_state(interaction.channel.id, current_step="awaiting_optimisation_package", selected_reason="optimisation", awaiting_reply=0)
+        await interaction.response.send_message("✅ Please choose your optimisation package below.", ephemeral=True)
         await interaction.channel.send(
-            f"{interaction.user.mention}\n"
-            "**Which package would you like to book?**\n\n"
-            "1️⃣ **Windows Optimisation + Basic Bios (No Fresh )** — **£100 |  Sub Price - £85**\n"
-            "2️⃣ **Fresh Install + Windows Opt + Basic Bios (Fresh  Required)** — **£135 | Sub Price - £100**\n"
-            "3️⃣ **(AMD) Fresh Install + Win Opti + Overclock** — **£165 | Sub Price - £140**\n"
-            "4️⃣ **(Intel) Fresh Install + Win Opti + Overclock** — **£185 | Sub Price - £150**\n"
-            "5️⃣ **Unsure?**\n\n"
-            "Select the most suitable option below.",
-            view=view
+            f"{interaction.user.mention}\n**{heading}**\n\n{prices}\n"
+            "**Full Tune includes:** Windows, BIOS, CPU & GPU overclocking, configs, control panel and RAM tuning.\n\n"
+            "Select the most suitable option below."
+            + booking_policy_text(),
+            view=OptimisationPackageView(channel_id=interaction.channel.id, user_id=self.user_id)
         )
 
     @discord.ui.button(label="Book a Network Optimisation", emoji="🌐", style=discord.ButtonStyle.primary, custom_id="ticket_reason_network")
@@ -922,53 +1017,77 @@ class TicketReasonView(discord.ui.View):
         if not await ensure_ticket_owner_only(interaction, self.user_id):
             return
 
-        await update_ticket_intake_state(
-            interaction.channel.id,
-            current_step="awaiting_network_service",
-            selected_reason="network_optimisation",
-            awaiting_reply=0
+        member = interaction.user
+        is_sub = isinstance(member, discord.Member) and member_has_subscriber_pricing(member)
+        prices = (
+            "1️⃣ **Windows Network Optimisation** — **FREE**\n"
+            "2️⃣ **Router / Open NAT** — **FREE**\n"
+            "3️⃣ **Network Bundle** — **£50**"
+            if is_sub else
+            "1️⃣ **Windows Network Optimisation** — **£35**\n"
+            "2️⃣ **Router / Open NAT** — **£15**\n"
+            "3️⃣ **Network Bundle** — **£50**"
+        )
+        heading = "Subscriber Network Prices" if is_sub else "Standard Network Prices"
+
+        await update_ticket_intake_state(interaction.channel.id, current_step="awaiting_network_service", selected_reason="network_optimisation", awaiting_reply=0)
+        await interaction.response.send_message("✅ Please choose your network service below.", ephemeral=True)
+        await interaction.channel.send(
+            f"{interaction.user.mention}\n**{heading}**\n\n{prices}\n\nSelect the most suitable option below."
+            + booking_policy_text(),
+            view=NetworkPackageView(channel_id=interaction.channel.id, user_id=self.user_id)
         )
 
-        view = NetworkPackageView(channel_id=interaction.channel.id, user_id=self.user_id)
-        await interaction.response.send_message(
-            "✅ Please choose your network service below.",
-            ephemeral=True
+    @discord.ui.button(label="Additional Add-ons", emoji="➕", style=discord.ButtonStyle.secondary, custom_id="ticket_reason_addons")
+    async def addons(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await ensure_ticket_owner_only(interaction, self.user_id):
+            return
+
+        member = interaction.user
+        is_sub = isinstance(member, discord.Member) and member_has_subscriber_pricing(member)
+        prices = (
+            "1️⃣ **Fresh Install** — **£15**\n"
+            "2️⃣ **AMD BIOS Update + Config** — **£30**\n"
+            "3️⃣ **Intel BIOS Update + Config** — **£40**"
+            if is_sub else
+            "1️⃣ **Fresh Install** — **£20**\n"
+            "2️⃣ **AMD BIOS Update + Config** — **£35**\n"
+            "3️⃣ **Intel BIOS Update + Config** — **£50**"
         )
+        await update_ticket_intake_state(interaction.channel.id, current_step="awaiting_addon_package", selected_reason="addon", awaiting_reply=0)
+        await interaction.response.send_message("✅ Please choose an add-on below.", ephemeral=True)
         await interaction.channel.send(
-            f"{interaction.user.mention}\n"
-            "**Which network service would you like to book?**\n\n"
-            "1️⃣ **Windows Sided Network Opti + Router Configuration Package (OpenNAT)** — **£50 | Sub Price - Free**\n"
-            "2️⃣ **Windows Sided Internet Optimisation** — **£35**\n"
-            "3️⃣ **Router Configuration Package (OpenNAT)** — **£25**\n\n"
-            "Select the most suitable option below.",
-            view=view
+            f"{interaction.user.mention}\n**{pricing_tier_name(member)} — Additional Add-ons**\n\n{prices}"
+            + booking_policy_text(),
+            view=AddOnPackageView(channel_id=interaction.channel.id, user_id=self.user_id)
+        )
+
+    @discord.ui.button(label="Extended Warranty", emoji="🛡️", style=discord.ButtonStyle.secondary, custom_id="ticket_reason_warranty")
+    async def warranty(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await ensure_ticket_owner_only(interaction, self.user_id):
+            return
+        await update_ticket_intake_state(interaction.channel.id, current_step="awaiting_warranty_package", selected_reason="extended_warranty", awaiting_reply=0)
+        await interaction.response.send_message("✅ Please choose an extended warranty below.", ephemeral=True)
+        await interaction.channel.send(
+            f"{interaction.user.mention}\n**Extended Warranty — One-Time Payment**\n\n"
+            "1️⃣ **7 Days** — **FREE**\n"
+            "2️⃣ **1 Month** — **£20**\n"
+            "3️⃣ **3 Months** — **£40**\n"
+            "4️⃣ **6 Months** — **£65**\n"
+            "5️⃣ **12 Months** — **£80**\n\n"
+            "Select the required warranty period below.\n\n**No refunds.**",
+            view=WarrantyPackageView(channel_id=interaction.channel.id, user_id=self.user_id)
         )
 
     @discord.ui.button(label="Book a Health Check", emoji="🩺", style=discord.ButtonStyle.secondary, custom_id="ticket_reason_healthcheck")
     async def health_check(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await ensure_ticket_owner_only(interaction, self.user_id):
             return
-
-        await update_ticket_intake_state(
-            interaction.channel.id,
-            current_step="awaiting_health_check_details",
-            selected_reason="health_check",
-            selected_package="health_check",
-            awaiting_reply=1
-        )
-
-        await interaction.response.send_message(
-            "✅ Please post the requested information in the ticket.",
-            ephemeral=True
-        )
+        await update_ticket_intake_state(interaction.channel.id, current_step="awaiting_health_check_details", selected_reason="health_check", selected_package="health_check", awaiting_reply=1)
+        await interaction.response.send_message("✅ Please post the requested information in the ticket.", ephemeral=True)
         await interaction.channel.send(
-            f"{interaction.user.mention}\n"
-            "**Health Check Request**\n\n"
-            "Please reply below with:\n"
-            "• the issue(s) you are experiencing\n"
-            "• your full PC specs\n"
-            "• any troubleshooting already attempted\n"
-            "• any known faults or recent changes\n\n"
+            f"{interaction.user.mention}\n**Health Check Request**\n\n"
+            "Please reply below with:\n• the issue(s) you are experiencing\n• your full PC specs\n• any troubleshooting already attempted\n• any known faults or recent changes\n\n"
             "Once you reply, I’ll post the pre-booking risk acknowledgement."
         )
 
@@ -976,23 +1095,9 @@ class TicketReasonView(discord.ui.View):
     async def ask_question(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await ensure_ticket_owner_only(interaction, self.user_id):
             return
-
-        await update_ticket_intake_state(
-            interaction.channel.id,
-            current_step="awaiting_question_text",
-            selected_reason="question",
-            selected_package="question",
-            awaiting_reply=1
-        )
-
-        await interaction.response.send_message(
-            "✅ Please post your question in the ticket.",
-            ephemeral=True
-        )
-        await interaction.channel.send(
-            f"{interaction.user.mention}\n"
-            "Please post your question below and **Jay** or **Liam** will be with you as soon as possible."
-        )
+        await update_ticket_intake_state(interaction.channel.id, current_step="awaiting_question_text", selected_reason="question", selected_package="question", awaiting_reply=1)
+        await interaction.response.send_message("✅ Please post your question in the ticket.", ephemeral=True)
+        await interaction.channel.send(f"{interaction.user.mention}\nPlease post your question below and **Jay** or **Liam** will be with you as soon as possible.")
 
 
 class OptimisationPackageView(discord.ui.View):
@@ -1001,35 +1106,84 @@ class OptimisationPackageView(discord.ui.View):
         self.channel_id = channel_id
         self.user_id = user_id
 
-    @discord.ui.button(label="Windows Optimisation", emoji="1️⃣", style=discord.ButtonStyle.primary, custom_id="opti_pkg_windows")
-    async def windows(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await ensure_ticket_owner_only(interaction, self.user_id):
-            return
-        await handle_optimisation_selection(interaction, "windows_optimisation_65", "Windows Optimisation + Basic Bios - £100 |  Sub Price - £85")
+    @discord.ui.button(label="Windows Opt — No Fresh Install", emoji="1️⃣", style=discord.ButtonStyle.primary, custom_id="opti_pkg_windows_no_fresh")
+    async def windows_no_fresh(self, interaction, button):
+        if await ensure_ticket_owner_only(interaction, self.user_id):
+            await handle_optimisation_selection(interaction, "windows_opt_no_fresh", "Windows Opt (No Fresh Install)", "£50", "£35")
 
-    @discord.ui.button(label="Custom OS + Opti", emoji="2️⃣", style=discord.ButtonStyle.primary, custom_id="opti_pkg_custom_os")
-    async def custom_os(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await ensure_ticket_owner_only(interaction, self.user_id):
-            return
-        await handle_optimisation_selection(interaction, "custom_os_with_optimisation_100", "Fresh Install + Windows Opt + Basic Bios - £135 | Sub Price - £100")
+    @discord.ui.button(label="Windows Opt — Fresh Install", emoji="2️⃣", style=discord.ButtonStyle.primary, custom_id="opti_pkg_windows_fresh")
+    async def windows_fresh(self, interaction, button):
+        if await ensure_ticket_owner_only(interaction, self.user_id):
+            await handle_optimisation_selection(interaction, "windows_opt_fresh", "Windows Opt (Fresh Install)", "£65", "£45")
 
-    @discord.ui.button(label="AMD OC Package", emoji="3️⃣", style=discord.ButtonStyle.primary, custom_id="opti_pkg_amd")
-    async def amd(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await ensure_ticket_owner_only(interaction, self.user_id):
-            return
-        await handle_optimisation_selection(interaction, "amd_custom_os_win_opti_overclock_150", "(AMD) Custom OS + Win Opti + Overclock — £165 | Sub Price - £140")
+    @discord.ui.button(label="Windows + BIOS", emoji="3️⃣", style=discord.ButtonStyle.primary, custom_id="opti_pkg_windows_bios")
+    async def windows_bios(self, interaction, button):
+        if await ensure_ticket_owner_only(interaction, self.user_id):
+            await handle_optimisation_selection(interaction, "windows_bios_basic", "Windows & BIOS Update + Basic BIOS Config", "£85", "£70")
 
-    @discord.ui.button(label="Intel OC Package", emoji="4️⃣", style=discord.ButtonStyle.primary, custom_id="opti_pkg_intel")
-    async def intel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await ensure_ticket_owner_only(interaction, self.user_id):
-            return
-        await handle_optimisation_selection(interaction, "intel_custom_os_win_opti_overclock_150", "(Intel) Custom OS + Win Opti + Overclock —  £185 | Sub Price - £150")
+    @discord.ui.button(label="AMD Full Tune", emoji="4️⃣", style=discord.ButtonStyle.primary, custom_id="opti_pkg_amd_full")
+    async def amd(self, interaction, button):
+        if await ensure_ticket_owner_only(interaction, self.user_id):
+            await handle_optimisation_selection(interaction, "amd_full_tune", "AMD Full Tune", "£135", "£115")
 
-    @discord.ui.button(label="Unsure", emoji="5️⃣", style=discord.ButtonStyle.secondary, custom_id="opti_pkg_unsure")
-    async def unsure(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await ensure_ticket_owner_only(interaction, self.user_id):
-            return
-        await handle_optimisation_selection(interaction, "unsure", "Unsure / Needs Guidance")
+    @discord.ui.button(label="Intel Full Tune", emoji="5️⃣", style=discord.ButtonStyle.primary, custom_id="opti_pkg_intel_full")
+    async def intel(self, interaction, button):
+        if await ensure_ticket_owner_only(interaction, self.user_id):
+            await handle_optimisation_selection(interaction, "intel_full_tune", "Intel Full Tune", "£165", "£145")
+
+
+class AddOnPackageView(discord.ui.View):
+    def __init__(self, channel_id: int, user_id: int):
+        super().__init__(timeout=None)
+        self.channel_id = channel_id
+        self.user_id = user_id
+
+    @discord.ui.button(label="Fresh Install", emoji="1️⃣", style=discord.ButtonStyle.primary, custom_id="addon_fresh_install")
+    async def fresh(self, interaction, button):
+        if await ensure_ticket_owner_only(interaction, self.user_id):
+            await handle_addon_selection(interaction, "addon_fresh_install", "Fresh Install", "£20", "£15")
+
+    @discord.ui.button(label="AMD BIOS Update + Config", emoji="2️⃣", style=discord.ButtonStyle.primary, custom_id="addon_amd_bios")
+    async def amd(self, interaction, button):
+        if await ensure_ticket_owner_only(interaction, self.user_id):
+            await handle_addon_selection(interaction, "addon_amd_bios", "AMD BIOS Update + Config", "£35", "£30")
+
+    @discord.ui.button(label="Intel BIOS Update + Config", emoji="3️⃣", style=discord.ButtonStyle.primary, custom_id="addon_intel_bios")
+    async def intel(self, interaction, button):
+        if await ensure_ticket_owner_only(interaction, self.user_id):
+            await handle_addon_selection(interaction, "addon_intel_bios", "Intel BIOS Update + Config", "£50", "£40")
+
+
+class WarrantyPackageView(discord.ui.View):
+    def __init__(self, channel_id: int, user_id: int):
+        super().__init__(timeout=None)
+        self.channel_id = channel_id
+        self.user_id = user_id
+
+    @discord.ui.button(label="7 Days — FREE", emoji="1️⃣", style=discord.ButtonStyle.success, custom_id="warranty_7_days")
+    async def days7(self, interaction, button):
+        if await ensure_ticket_owner_only(interaction, self.user_id):
+            await handle_warranty_selection(interaction, "warranty_7_days", "7 Days", "FREE")
+
+    @discord.ui.button(label="1 Month — £20", emoji="2️⃣", style=discord.ButtonStyle.primary, custom_id="warranty_1_month")
+    async def month1(self, interaction, button):
+        if await ensure_ticket_owner_only(interaction, self.user_id):
+            await handle_warranty_selection(interaction, "warranty_1_month", "1 Month", "£20")
+
+    @discord.ui.button(label="3 Months — £40", emoji="3️⃣", style=discord.ButtonStyle.primary, custom_id="warranty_3_months")
+    async def month3(self, interaction, button):
+        if await ensure_ticket_owner_only(interaction, self.user_id):
+            await handle_warranty_selection(interaction, "warranty_3_months", "3 Months", "£40")
+
+    @discord.ui.button(label="6 Months — £65", emoji="4️⃣", style=discord.ButtonStyle.primary, custom_id="warranty_6_months")
+    async def month6(self, interaction, button):
+        if await ensure_ticket_owner_only(interaction, self.user_id):
+            await handle_warranty_selection(interaction, "warranty_6_months", "6 Months", "£65")
+
+    @discord.ui.button(label="12 Months — £80", emoji="5️⃣", style=discord.ButtonStyle.primary, custom_id="warranty_12_months")
+    async def month12(self, interaction, button):
+        if await ensure_ticket_owner_only(interaction, self.user_id):
+            await handle_warranty_selection(interaction, "warranty_12_months", "12 Months", "£80")
 
 
 class NetworkPackageView(discord.ui.View):
@@ -1038,91 +1192,38 @@ class NetworkPackageView(discord.ui.View):
         self.channel_id = channel_id
         self.user_id = user_id
 
-    @discord.ui.button(label="Bundle (£50)", emoji="1️⃣", style=discord.ButtonStyle.primary, custom_id="network_pkg_both")
-    async def both(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="Windows Network Optimisation", emoji="1️⃣", style=discord.ButtonStyle.primary, custom_id="network_pkg_windows")
+    async def windows(self, interaction, button):
         if not await ensure_ticket_owner_only(interaction, self.user_id):
             return
+        body = "**Windows Network Optimisation**\nRun a bufferbloat test and post the results in this ticket:\nhttps://www.waveform.com/tools/bufferbloat"
+        await handle_network_selection(interaction, "windows_network_opt", "Windows Network Optimisation", body, "£35", "FREE")
 
-        body = (
-            "**Windows Sided Internet Optimisation**\n"
-            "Use the following link to run a test and post your results in this ticket:\n"
-            "https://www.waveform.com/tools/bufferbloat\n\n"
-            "**Router Configuration Package (OpenNAT)**\n"
-            "To see if you’re eligible for port forwarding, please do the following:\n\n"
-            "1. Log into your router GUI. Typically this is by typing `192.168.1.X` into your browser, "
-            "with the `X` being another number such as `1` or `254`. These vary. If you are unsure, search your "
-            "**ISP + hub manager login IP**.\n\n"
-            "2. Once logged in, locate your router WAN / internet IP address and keep note of it.\n\n"
-            "3. Go to:\n"
-            "https://whatismyipaddress.com/#google_vignette\n\n"
-            "4. You will see both an IPv6 and IPv4 address. You are looking for the **IPv4** address.\n\n"
-            "5. Compare that IPv4 address with the IP address shown in your router GUI.\n"
-            "• If they **do not match**, you are more than likely behind **CGNAT** and may need to contact your ISP to request a **Static IP**.\n"
-            "• If they **do match**, continue to the next step.\n\n"
-            "6. Go back to your router GUI and locate **Port Forwarding**. This is usually under **Security** or **Advanced**, "
-            "but it varies by router.\n\n"
-            "7. Once you have found Port Forwarding, remain in the ticket and we can do a port forward check with a port listener "
-            "to confirm it works before we complete the router configuration.\n\n"
-            "If you are unsure how to do this, we can hop on a call and check this for you, but there will be a **non-refundable £10 fee**. "
-            "If port forwarding is available, that **£10 is deducted** from the service amount. "
-            "If you are on one of our qualifying packages, there is no charge for this check."
-        )
-        await handle_network_selection(
-            interaction,
-            "windows_router_bundle_45",
-            "Windows Sided Network Opti + Router Configuration Package (OpenNAT) — £50 | Sub Price - Free",
-            body
-        )
-
-    @discord.ui.button(label="Windows Only (£35)", emoji="2️⃣", style=discord.ButtonStyle.primary, custom_id="network_pkg_windows")
-    async def windows(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="Router / Open NAT", emoji="2️⃣", style=discord.ButtonStyle.primary, custom_id="network_pkg_router")
+    async def router(self, interaction, button):
         if not await ensure_ticket_owner_only(interaction, self.user_id):
             return
-
         body = (
-            "**Windows Sided Internet Optimisation**\n"
-            "Use the following link to run a test and post your results in this ticket:\n"
-            "https://www.waveform.com/tools/bufferbloat"
+            "**Router / Open NAT**\n"
+            "1. Log into your router GUI, normally using an address such as `192.168.1.1` or `192.168.1.254`.\n"
+            "2. Find and note the router WAN/internet IP address.\n"
+            "3. Visit https://whatismyipaddress.com/#google_vignette and note the IPv4 address.\n"
+            "4. Compare it with the WAN IP shown in the router. If they do not match, you are likely behind CGNAT and may need to ask your ISP for a static/public IPv4 address.\n"
+            "5. If they match, locate Port Forwarding, usually under Security or Advanced.\n"
+            "6. Stay in the ticket so we can run a port-listener test before configuration.\n\n"
+            "If you need us to check eligibility on a call, the check is a non-refundable £10. If port forwarding is available, that £10 is deducted from the service price. Qualifying subscribers are not charged for this check."
         )
-        await handle_network_selection(
-            interaction,
-            "windows_sided_network_35",
-            "Windows Sided Internet Optimisation — £35",
-            body
-        )
+        await handle_network_selection(interaction, "router_open_nat", "Router / Open NAT", body, "£15", "FREE")
 
-    @discord.ui.button(label="Router Only (£25)", emoji="3️⃣", style=discord.ButtonStyle.primary, custom_id="network_pkg_router")
-    async def router(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="Network Bundle", emoji="3️⃣", style=discord.ButtonStyle.primary, custom_id="network_pkg_bundle")
+    async def bundle(self, interaction, button):
         if not await ensure_ticket_owner_only(interaction, self.user_id):
             return
-
         body = (
-            "**Router Configuration Package (OpenNAT)**\n"
-            "To see if you’re eligible for port forwarding, please do the following:\n\n"
-            "1. Log into your router GUI. Typically this is by typing `192.168.1.X` into your browser, "
-            "with the `X` being another number such as `1` or `254`. These vary. If you are unsure, search your "
-            "**ISP + hub manager login IP**.\n\n"
-            "2. Once logged in, locate your router WAN / internet IP address and keep note of it.\n\n"
-            "3. Go to:\n"
-            "https://whatismyipaddress.com/#google_vignette\n\n"
-            "4. You will see both an IPv6 and IPv4 address. You are looking for the **IPv4** address.\n\n"
-            "5. Compare that IPv4 address with the IP address shown in your router GUI.\n"
-            "• If they **do not match**, you are more than likely behind **CGNAT** and may need to contact your ISP to request a **Static IP**.\n"
-            "• If they **do match**, continue to the next step.\n\n"
-            "6. Go back to your router GUI and locate **Port Forwarding**. This is usually under **Security** or **Advanced**, "
-            "but it varies by router.\n\n"
-            "7. Once you have found Port Forwarding, remain in the ticket and we can do a port forward check with a port listener "
-            "to confirm it works before we complete the router configuration.\n\n"
-            "If you are unsure how to do this, we can hop on a call and check this for you, but there will be a **non-refundable £10 fee**. "
-            "If port forwarding is available, that **£10 is deducted** from the service amount. "
-            "If you are on one of our qualifying packages, there is no charge for this check."
+            "**Windows Network Optimisation**\nRun a bufferbloat test and post the results in this ticket:\nhttps://www.waveform.com/tools/bufferbloat\n\n"
+            "**Router / Open NAT**\nLog into your router, compare its WAN IP with your public IPv4 address, locate Port Forwarding, and remain in the ticket so we can complete a port-listener test before configuration."
         )
-        await handle_network_selection(
-            interaction,
-            "router_configuration_25",
-            "Router Configuration Package (OpenNAT) — £25",
-            body
-        )
+        await handle_network_selection(interaction, "network_bundle", "Network Bundle", body, "£50", "£50")
 
 
 class NetworkCompletedView(discord.ui.View):
@@ -1527,6 +1628,8 @@ async def on_ready():
     bot.add_view(TicketReasonView(channel_id=0, user_id=0))
     bot.add_view(OptimisationPackageView(channel_id=0, user_id=0))
     bot.add_view(NetworkPackageView(channel_id=0, user_id=0))
+    bot.add_view(AddOnPackageView(channel_id=0, user_id=0))
+    bot.add_view(WarrantyPackageView(channel_id=0, user_id=0))
     bot.add_view(NetworkCompletedView(channel_id=0, user_id=0))
 
     if not timer_loop.is_running():
