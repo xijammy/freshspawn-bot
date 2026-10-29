@@ -1,4 +1,4 @@
-"""Optional MW4 staff commands for the existing Fresh Spawn bot."""
+"""Optional MW4 activation and staff commands for the existing Fresh Spawn bot."""
 import asyncio
 import os
 from urllib.parse import urlsplit
@@ -29,6 +29,7 @@ def install(bot):
         return False
     guild_id = int(values['MFG_GUILD_ID'])
     role_id = int(values['MFG_STAFF_ROLE_ID'])
+    customer_role_id = os.getenv('MFG_CUSTOMER_ROLE_ID', '').strip()
 
     async def allowed(interaction):
         member = interaction.user
@@ -63,6 +64,62 @@ def install(bot):
 
     group = app_commands.Group(name='mw4', description='Manage single-PC MW4 licences', guild_only=True)
 
+    async def claim_code(interaction):
+        if interaction.guild_id != guild_id or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message('Use this button inside the MFG server.', ephemeral=True)
+            return
+        if (not customer_role_id.isdigit() or not any(
+                str(role.id) == customer_role_id for role in interaction.user.roles)):
+            await interaction.response.send_message('You need the MW4 Config role to get an activation code. Please contact MFG staff if you should have access.', ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            data = await request('POST', '/internal/activation/issue', json={'discord_id': str(interaction.user.id), 'product_id': 'mw4'})
+            await interaction.followup.send(
+                f"Your MW4 activation code is:\n`{data['code']}`\n"
+                'Enter it in the MW4 Config Tool on your own PC. It expires in 24 hours and activates one PC. '
+                'Only you can see this message. Keep the code private. Requesting another code replaces any unused previous code.',
+                ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+        except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
+            await report_error(interaction, exc)
+
+    class ActivationPanel(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=None)
+
+        @discord.ui.button(label='Get Activation Code', style=discord.ButtonStyle.primary,
+                           custom_id='mfg:mw4:claim:v1')
+        async def get_code(self, interaction, button):
+            await claim_code(interaction)
+
+        async def on_error(self, interaction, error, item):
+            message = 'Unable to get your code. Please try again or contact MFG staff.'
+            if interaction.response.is_done():
+                await interaction.followup.send(message, ephemeral=True)
+            else:
+                await interaction.response.send_message(message, ephemeral=True)
+
+    panel_registered = False
+
+    async def register_panel():
+        nonlocal panel_registered
+        if not panel_registered:
+            bot.add_view(ActivationPanel())
+            panel_registered = True
+
+    bot.add_listener(register_panel, 'on_ready')
+
+    @group.command(name='panel', description='Post the customer activation button in this channel')
+    @app_commands.check(allowed)
+    async def panel(interaction: discord.Interaction):
+        await interaction.response.send_message(
+            '**MW4 Config Tool activation**\nMembers with the MW4 Config role can click below to get a private activation code. No DMs needed. One PC per licence.',
+            view=ActivationPanel(), allowed_mentions=discord.AllowedMentions.none())
+
+    @group.command(name='code', description='Get your private activation code using your MW4 Config role')
+    async def code(interaction: discord.Interaction):
+        await claim_code(interaction)
+
     @group.command(name='issue', description='Send a customer an MW4 activation code by DM')
     @app_commands.check(allowed)
     async def issue(interaction: discord.Interaction, customer: discord.Member):
@@ -75,7 +132,7 @@ def install(bot):
                     'Enter it in the MW4 Config Tool on your own PC. It expires in 24 hours and activates one PC. Keep it private.')
             except discord.HTTPException:
                 await interaction.followup.send(
-                    'The code was created but Discord could not deliver the DM. Ask the customer to enable DMs, then run /mw4 issue again. The new code replaces the previous one.', ephemeral=True)
+                    'The code was created but Discord could not deliver the DM. Customers with the MW4 Config role can use /mw4 code or the activation button instead. Requesting a new code replaces the previous one.', ephemeral=True)
                 return
             await interaction.followup.send('Activation code sent to the customer by DM.', ephemeral=True)
         except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
@@ -99,7 +156,7 @@ def install(bot):
         await interaction.response.defer(ephemeral=True)
         try:
             await request('POST', '/internal/revoke', json={'discord_id': str(customer.id), 'product_id': 'mw4'})
-            await interaction.followup.send('MW4 licence revoked. To allow a replacement PC, run /mw4 issue and have the customer activate on that PC.', ephemeral=True)
+            await interaction.followup.send('MW4 licence and any unused code revoked. Members who still have the MW4 Config role can request a new code for a replacement PC. Remove that role to prevent further requests.', ephemeral=True)
         except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
             await report_error(interaction, exc)
 
@@ -116,3 +173,4 @@ def install(bot):
     bot.tree.add_command(group)
     print('[MFG] MW4 licensing commands registered.')
     return True
+
