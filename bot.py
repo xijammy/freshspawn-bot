@@ -2417,4 +2417,8 @@ async def before_post_service_loop():
     await bot.wait_until_ready()
 
 
+from mw4_licensing import install as install_mw4_licensing
+
+install_mw4_licensing(bot)
+
 bot.run(DISCORD_TOKEN)
